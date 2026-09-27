@@ -1,0 +1,6 @@
+.asset-data/
+node_modules/
+.env
+.env.*
+coverage/
+*.log

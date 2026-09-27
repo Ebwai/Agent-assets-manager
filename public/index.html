@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent 资产管理助手</title>
+  <meta name="description" content="在本机创建、审查、版本化并生效 Agent Skills、提示词和 Agent 配置。">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/updates.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">A<span>·</span></div><div><strong>Agent 资产</strong><small>工作台</small></div></div>
+      <nav id="nav" aria-label="主导航"></nav>
+      <div class="sidebar-foot"><span class="pulse"></span> 本机运行 <span class="muted">· Git 已接入</span></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><div><div class="eyebrow" id="breadcrumb">WORKSPACE / ASSETS</div><h1 id="page-title">Skills</h1></div><div class="top-actions"><span class="local-badge">LOCAL FIRST</span><button class="btn btn-primary" id="new-button">＋ 新建 Skill</button></div></header>
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+      <div id="content"></div>
+    </main>
+  </div>
+  <dialog id="modal"><div class="modal-head"><h2 id="modal-title"></h2><button id="modal-close" class="icon-btn" aria-label="关闭">×</button></div><div id="modal-body"></div></dialog>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
