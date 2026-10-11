@@ -1,12 +1,13 @@
+import { pluginUI } from './plugins.js';
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]);
 const deep = value => structuredClone(value);
-const labels = { home:'首页', skill:'Skills', workflow:'多个 Skills 包联动套件', prompt:'系统提示词', agent:'Agent', project:'项目', model:'模型服务', settings:'审查配置', deploy:'一键生效', sync:'远程同步' };
-const icons = { home:'⌂', skill:'◇', workflow:'↳', prompt:'≡', agent:'◈', project:'▣', model:'◉', settings:'⚙', deploy:'↗', sync:'⇄' };
-const state = { assets:{}, sync:{}, section:'home', selected:null, draft:null, variant:'common', query:'', deployment:null, openFields:{}, openYamlGroups:{}, skillsNavOpen:false, profileDrafts:{} };
+const labels = { plugin:'Plugins', home:'首页', skill:'Skills', workflow:'多个 Skills 包联动套件', prompt:'系统提示词', hook:'单个 Hook', hookgroup:'Hooks 组', rule:'Rules', agent:'Agent', project:'项目', model:'模型服务', settings:'审查配置', deploy:'一键生效', sync:'远程同步' };
+const icons = { plugin:'▧', home:'⌂', skill:'◇', workflow:'↳', prompt:'≡', hook:'⚡', hookgroup:'⚡', rule:'§', agent:'◈', project:'▣', model:'◉', settings:'⚙', deploy:'↗', sync:'⇄' };
+const state = { assets:{}, sync:{}, section:'home', selected:null, draft:null, variant:'common', query:'', deployment:null, openFields:{}, openYamlGroups:{}, skillsNavOpen:false, hooksNavOpen:false, profileDrafts:{} };
 const profiledTypes = new Set(['skill','workflow','prompt','agent']);
-const profileFields = {skill:['description','variants','files'],workflow:['description','members','skillIds'],prompt:['description','scope','target','content'],agent:['description','harness','modelId','instructions','skillIds','workflowIds','promptIds','tools','mcps']};
+const profileFields = {skill:['description','variants','files'],workflow:['description','members','skillIds'],prompt:['description','scope','target','content'],agent:['description','harness','modelId','instructions','skillIds','workflowIds','promptIds','hookIds','hookGroupIds','ruleIds','tools','mcps']};
 const modal = $('#modal');
 const standard = [
   { key:'name', label:'name', required:true, purpose:'Skill 的唯一标识，也是目录名。', practice:'使用明确的能力名称，如 pdf-extraction；1–64 位小写字母、数字和连字符，不能连续使用连字符。', example:'pdf-extraction', check:v=> /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v||'') && v.length<=64 },
@@ -52,7 +53,8 @@ function toolChoices(groups,selected,attribute) { return `<div class="tool-group
 function toolRules(value) { return String(value||'').match(/[^\s,()]+(?:\([^)]*\))?/g)||[]; }
 function notice(message, error=false) { const n=$('#notice'); n.textContent=message; n.className=`notice show${error?' error':''}`; clearTimeout(notice.timer); notice.timer=setTimeout(()=>n.className='notice',5000); }
 async function api(path, method='GET', body) { const res=await fetch('/api/'+path,{method,headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined}); const data=await res.json(); if(!res.ok) throw new Error(data.error||'操作失败'); return data; }
-async function refresh() { const data=await api('bootstrap'); state.assets=data.assets; state.sync=data.sync||{}; if(state.selected && !state.assets[state.section]?.some(a=>a.id===state.selected)) state.selected=null; render(); }
+const pluginsUI = pluginUI({api,escapeHtml,notice,showModal,assets:()=>state.assets,isActive:()=>state.section==='plugin'});
+async function refresh() { const data=await api('bootstrap'); state.hookEvents=data.hookEvents||[]; state.assets=data.assets; state.sync=data.sync||{}; if(state.selected && !state.assets[state.section]?.some(a=>a.id===state.selected)) state.selected=null; render(); }
 function options(type, selected='', blank='请选择') { return `<option value="">${blank}</option>${(state.assets[type]||[]).map(a=>`<option value="${escapeHtml(a.id)}" ${a.id===selected?'selected':''}>${escapeHtml(type==='model'?`${a.title||a.name} · ${a.model}`:a.title||a.name)}</option>`).join('')}`; }
 function nav() {
   const item=t=>`<button class="nav-item ${state.section===t?'active':''}" data-nav="${t}" data-tooltip="${labels[t]}" aria-label="${labels[t]}" title="${labels[t]}"><span class="ico">${icons[t]}</span><span>${labels[t]}</span>${state.assets[t]&&t!=='settings'?`<span class="nav-count">${state.assets[t].length}</span>`:''}</button>`;
@@ -60,18 +62,22 @@ function nav() {
   $('#nav').innerHTML=`<div class="nav-label">总览</div>${item('home')}<div class="nav-label">资产库</div>
     <div class="nav-skill-group"><button class="nav-item nav-skills-toggle ${['skill','workflow'].includes(state.section)?'active':''}" id="skills-nav-toggle" aria-label="Skills 分类" data-tooltip="Skills 分类" title="Skills 分类" aria-expanded="${state.skillsNavOpen}" aria-controls="skills-nav-submenu"><span class="ico">${icons.skill}</span><span>Skills</span><span class="nav-count">${skillCount}</span><span class="nav-chevron" aria-hidden="true">⌄</span></button>
     <div class="nav-submenu ${state.skillsNavOpen?'open':''}" id="skills-nav-submenu">${[['skill','单个 Skills 包','1'],['workflow','多个 Skills 联动套件','2']].map(([type,label,icon])=>`<button class="nav-subitem ${state.section===type?'active':''}" data-nav="${type}" aria-label="${label}"><span class="nav-subicon">${icon}</span><span class="nav-subtext">${label}</span></button>`).join('')}</div></div>
-    ${item('prompt')}${item('agent')}<div class="nav-label">运行环境</div>${['project','model','settings','deploy','sync'].map(item).join('')}`;
+    ${item('prompt')}<div class="nav-skill-group"><button class="nav-item nav-skills-toggle ${['hook','hookgroup'].includes(state.section)?'active':''}" id="hooks-nav-toggle" aria-label="Hooks 分类" data-tooltip="Hooks 分类" title="Hooks 分类" aria-expanded="${state.hooksNavOpen}" aria-controls="hooks-nav-submenu"><span class="ico">⚡</span><span>Hooks</span><span class="nav-count">${(state.assets.hook?.length||0)+(state.assets.hookgroup?.length||0)}</span><span class="nav-chevron" aria-hidden="true">⌄</span></button><div class="nav-submenu ${state.hooksNavOpen?'open':''}" id="hooks-nav-submenu">${[['hook','单个 Hook','1'],['hookgroup','Hooks 组','2']].map(([type,label,icon])=>`<button class="nav-subitem ${state.section===type?'active':''}" data-nav="${type}" aria-label="${label}"><span class="nav-subicon">${icon}</span><span class="nav-subtext">${label}</span></button>`).join('')}</div></div>${item('rule')}${item('agent')}${item('plugin')}<div class="nav-label">运行环境</div>${['project','model','settings','deploy','sync'].map(item).join('')}`;
+  $('#hooks-nav-toggle').onclick=()=>{state.hooksNavOpen=!state.hooksNavOpen;nav();};
   $('#skills-nav-toggle').onclick=()=>{ state.skillsNavOpen=!state.skillsNavOpen; nav(); };
   $$('[data-nav]').forEach(button=>button.onclick=()=>selectSection(button.dataset.nav));
 }
-function selectSection(section) { state.section=section; state.selected=null; state.draft=null; state.query=''; state.variant='common'; state.openFields={}; state.openYamlGroups={}; state.profileDrafts={}; state.lastProfileCopy=null; if(['skill','workflow'].includes(section)) state.skillsNavOpen=true; render(); }
+function selectSection(section) { state.section=section; state.selected=null; state.draft=null; state.query=''; state.variant='common'; state.openFields={}; state.openYamlGroups={}; state.profileDrafts={}; state.lastProfileCopy=null; if(['skill','workflow'].includes(section)) state.skillsNavOpen=true; if(['hook','hookgroup'].includes(section)) state.hooksNavOpen=true; render(); }
 function emptyDraft(type) {
   const base={title:'',description:''};
   if(type==='skill') return {...base,variants:{common:{frontmatter:{name:'',description:'',metadata:{version:'1.0.0'}},descriptionParts:{what:'',when:'',keywords:''},body:'## Purpose / Overview\n\n## Core workflow\n\n1. \n\n## Input\n\n## Output\n\n## Key Points\n\n## Edge cases\n\n## Tools / resources\n\n## Verification\n'}},files:{}};
   if(type==='workflow') return {...base,members:[]};
+  if(type==='hookgroup') return {...base,harness:'claude',members:[]};
+  if(type==='hook') return {...base,harness:'claude',event:'PreToolUse',matcher:'Bash',async:false,timeout:10,runtime:'node',entry:'scripts/main.mjs',files:{'scripts/main.mjs':hookTemplate('PreToolUse')}};
+  if(type==='rule') return {...base,harness:'claude',fileName:'rule.md',paths:[],content:''};
   if(type==='prompt') return {...base,scope:'global',target:'',content:''};
-  if(type==='agent') return {...base,harness:'claude',instructions:'',skillIds:[],workflowIds:[],promptIds:[],tools:[],mcps:[],modelId:''};
-  if(type==='project') return {...base,directory:'',suiteIds:[]};
+  if(type==='agent') return {...base,harness:'claude',instructions:'',hookIds:[],hookGroupIds:[],ruleIds:[],skillIds:[],workflowIds:[],promptIds:[],tools:[],mcps:[],modelId:''};
+  if(type==='project') return {...base,directory:'',suiteIds:[],ruleIds:[]};
   if(type==='model') return {...base,baseUrl:'https://api.anthropic.com',model:'',apiKey:''};
   if(type==='settings') return {...base,title:'审查与改进提示词',reviewSystem:'',improveSystem:''};
 }
@@ -84,6 +90,7 @@ function render() {
   $('#new-button').style.display=['home','deploy','settings','sync'].includes(state.section)?'none':'';
   $('#new-button').textContent=`＋ 新建${state.section==='skill'?' Skill':' '+labels[state.section]}`;
   $('#new-button').onclick=newAsset;
+  if(state.section==='plugin') return pluginsUI.render();
   if(state.section==='home') return renderHome();
   if(state.section==='deploy') return renderDeploy();
   if(state.section==='sync') return renderSync();
@@ -93,11 +100,13 @@ function render() {
   const filtered=data.filter(a=>`${a.title||a.name} ${a.description||''}`.toLowerCase().includes(state.query.toLowerCase()));
   const count=(t)=>state.assets[t]?.length||0;
   $('#content').innerHTML=`${section==='skill'?`<div class="stat-row"><div class="stat"><div class="num">${count('skill')}</div><div class="label">Skills</div></div><div class="stat"><div class="num">${count('workflow')}</div><div class="label">Skills 套件</div></div><div class="stat"><div class="num">${count('agent')}</div><div class="label">Agents</div></div><div class="stat"><div class="num">${count('project')}</div><div class="label">项目</div></div></div>`:''}
-  <div class="intro"><div><h2>${section==='skill'?'可发现、可复用的任务能力包':labels[section]+'资产'}</h2><p>${section==='skill'?'列表只展示名称和说明；触发后才加载 SKILL.md，执行时再按需读取 references、scripts 与 assets。':introText[section]}</p></div></div>
-  <div class="workspace"><aside class="panel"><div class="panel-head"><h3 class="panel-title">${labels[section]}列表</h3><span class="panel-sub">${data.length} 项</span></div><div class="list-tools"><input class="search" id="asset-search" placeholder="搜索名称或说明..." value="${escapeHtml(state.query)}"></div><div class="asset-list">${filtered.length?filtered.map(a=>`<button class="asset-item ${state.selected===a.id?'active':''}" data-select="${a.id}"><span class="asset-glyph">${icons[section]}</span><div><strong>${escapeHtml(a.title||a.name)}</strong><small>${section==='project'&&!a.directory?'待分配本机路径 · ':''}${escapeHtml(a.description||a.directory||a.model||'暂无说明')}</small></div></button>`).join(''):`<div class="empty"><span class="symbol">◇</span>${state.query?'没有匹配的资产':'还没有资产，点击右上角新建。'}</div>`}</div><div class="panel-head"><button class="btn btn-sm" id="trash-btn">查看已删除资产</button></div></aside><section class="panel" id="editor-panel">${state.draft?renderForm(section):`<div class="empty" style="padding:100px 24px"><span class="symbol">✧</span>选择左侧资产，或新建一个${labels[section]}。</div>`}</section></div>`;
-  $('#asset-search').oninput=e=>{state.query=e.target.value; const pos=e.target.selectionStart; render(); $('#asset-search').focus(); $('#asset-search').setSelectionRange(pos,pos);};
+  <div class="intro"><div><h2>${section==='skill'?'可发现、可复用的任务能力包':labels[section]+'资产'}</h2><p>${section==='skill'?'列表只展示名称和说明；触发后才加载 SKILL.md，执行时再按需读取 references、scripts 与 assets。':introText[section]}</p></div>${section==='hook'?'<button class="btn" id="import-hook-config">导入 Hooks 配置</button><input id="hook-config-files" type="file" accept=".json,.toml" multiple hidden>':''}</div>
+  <div class="workspace"><aside class="panel"><div class="panel-head"><h3 class="panel-title">${labels[section]}列表</h3><span class="panel-sub">${data.length} 项</span></div>${section==='rule'?'':`<div class="list-tools"><input class="search" id="asset-search" placeholder="搜索名称或说明..." value="${escapeHtml(state.query)}"></div>`}<div class="asset-list">${filtered.length?filtered.map(a=>`<button class="asset-item ${state.selected===a.id?'active':''}" data-select="${a.id}"><span class="asset-glyph">${icons[section]}</span><div><strong>${escapeHtml(a.title||a.name)}</strong><small>${section==='project'&&!a.directory?'待分配本机路径 · ':''}${escapeHtml(a.description||a.directory||a.model||'暂无说明')}</small></div></button>`).join(''):`<div class="empty"><span class="symbol">◇</span>${state.query?'没有匹配的资产':'还没有资产，点击右上角新建。'}</div>`}</div><div class="panel-head"><button class="btn btn-sm" id="trash-btn">查看已删除资产</button></div></aside><section class="panel" id="editor-panel">${state.draft?renderForm(section):`<div class="empty" style="padding:100px 24px"><span class="symbol">✧</span>选择左侧资产，或新建一个${labels[section]}。</div>`}</section></div>`;
+  if($('#asset-search')) $('#asset-search').oninput=e=>{state.query=e.target.value; const pos=e.target.selectionStart; render(); $('#asset-search').focus(); $('#asset-search').setSelectionRange(pos,pos);};
   $$('[data-select]').forEach(b=>b.onclick=()=>selectAsset(b.dataset.select));
   $('#trash-btn').onclick=()=>showTrash(section);
+  $('#import-hook-config')?.addEventListener('click',chooseHookImport);
+  $('#hook-config-files')?.addEventListener('change',event=>importHookFiles(event.target.files));
   if(state.draft) bindForm(section);
 }
 function renderHome() {
@@ -105,7 +114,7 @@ function renderHome() {
   const child=(label,description,section,mode='',value='')=>`<button class="map-child" data-home-section="${section}" data-home-mode="${mode}" data-home-value="${value}"><span>${escapeHtml(label)}</span><small>${escapeHtml(description)}</small><b aria-hidden="true">↗</b></button>`;
   $('#content').innerHTML=`<div class="home-layout"><section class="map-surface" aria-label="Agent 资产关系图">
     <div class="map-caption"><span>ASSET MAP</span><span>点击节点进入配置</span></div>
-    <button class="map-root" data-home-section="home"><span class="root-icon">✦</span><span><strong>Agent资产管理</strong><small>从提示词、Skills 到 Agent 的统一资产入口</small></span><span class="root-count">${count('skill')+count('workflow')+count('prompt')+count('agent')} 项资产</span></button>
+    <button class="map-root" data-home-section="home"><span class="root-icon">✦</span><span><strong>Agent资产管理</strong><small>从提示词、Skills 到 Agent 的统一资产入口</small></span><span class="root-count">${count('skill')+count('workflow')+count('prompt')+count('hook')+count('hookgroup')+count('rule')+count('agent')} 项资产</span></button>
     <div class="map-trunk" aria-hidden="true"></div><div class="map-columns">
       <div class="map-column"><button class="map-parent parent-prompt" data-home-section="prompt"><span class="map-parent-icon">≡</span><span><strong>系统提示词</strong><small>${count('prompt')} 个提示词层</small></span><b>↗</b></button><div class="map-children">
         ${child('针对项目','项目范围指令','prompt','new','project')}
@@ -119,6 +128,8 @@ function renderHome() {
       <div class="map-column"><button class="map-parent parent-agent" data-home-section="agent"><span class="map-parent-icon">◈</span><span><strong>Agent</strong><small>${count('agent')} 个 Agent 配置</small></span><b>↗</b></button><div class="map-children">
         ${child('模型配置','Anthropic 协议服务','model')}
         ${child('资产配置','Skills、套件与 MCP','agent')}
+        ${child('单个 Hook','自动检查与事件脚本','hook')}${child('Hooks 组','组合服务于同一用途的 Hooks','hookgroup')}
+        ${child('Rules','Claude Code 行为规范','rule')}
         ${child('系统提示词配置','组合与关联提示词','prompt')}
       </div></div>
       <div class="map-column"><button class="map-parent parent-environment" data-home-section="project"><span class="map-parent-icon">▣</span><span><strong>项目与应用</strong><small>${count('project')} 个目标项目</small></span><b>↗</b></button><div class="map-children">
@@ -161,14 +172,14 @@ async function showRecentHistory() {
     $$('[data-open-history]').forEach(button=>button.onclick=()=>{ const [type,id]=button.dataset.openHistory.split(':'); modal.close(); selectSection(type); selectAsset(id); showHistory(type,id); });
   } catch(error) { notice(error.message,true); }
 }
-const introText={workflow:'按用途把多个 Skills 归为一套，并说明每个 Skill 在其中的定位。套件可整体应用到项目。',prompt:'按通用、模型、软件、项目四层组合项目指令。',agent:'指定 Agent 的 Skills、套件、工具、MCP 与提示词。',project:'登记项目并关联默认 Skills 套件；每台电脑分别分配项目目录。',model:'配置 Anthropic 协议模型，用于 Skill 审查与改进。'};
+const introText={hookgroup:'把服务于同一用途的多个 Hook 组合在一起，整组关联和应用。',rule:'Claude Code 的 Markdown 行为规范，可适用于整个项目或匹配的文件。',hook:'在会话或工具事件发生时自动运行脚本；按软件管理，与模型版本无关。',workflow:'按用途把多个 Skills 归为一套，并说明每个 Skill 在其中的定位。套件可整体应用到项目。',prompt:'按通用、模型、软件、项目四层组合项目指令。',agent:'指定 Agent 的 Skills、套件、工具、MCP 与提示词。',project:'登记项目并关联默认 Skills 套件；每台电脑分别分配项目目录。',model:'配置 Anthropic 协议模型，用于 Skill 审查与改进。'};
 function editorHead(type) { const d=state.draft; return `<div class="editor-head"><div><h2>${d.id?escapeHtml(d.title||d.name):'新建'+labels[type]}</h2><p>${d.activeVersion?`本机正使用历史版本 ${escapeHtml(d.activeVersion.slice(0,7))} · 选择版本不产生提交；保存修改才创建新版本`:d.id?`最近更新 ${new Date(d.updatedAt).toLocaleString('zh-CN')}`:'填写内容后保存为首个 Git 版本'}</p></div><div class="editor-actions">${d.id?`<button class="btn btn-sm" id="history-btn">版本历史</button><button class="btn btn-sm btn-danger" id="delete-btn">删除</button>`:''}${type==='skill'&&!d.id?'<button class="btn btn-sm" id="import-skill">导入已有 Skill</button><button class="btn btn-sm" id="import-local-skill">从本地目录导入</button><input id="local-skill-directory" type="file" webkitdirectory directory multiple hidden>':''}<button class="btn btn-sm btn-primary" id="save-btn">保存版本</button></div></div>`; }
 function profileSnapshot(type, draft) { return Object.fromEntries(profileFields[type].filter(key=>Object.hasOwn(draft,key)).map(key=>[key,deep(draft[key])])); }
 function profileChoice() {
   const d=state.draft, key=`${d.assetHarness||''}:${d.assetModelId||''}`, configured=!!d.profiles?.[key];
   return `<div class="asset-profile"><div class="section-title">此资产的适用版本</div><div class="form-grid"><div class="field"><label class="field-label" for="asset-harness">Harness 框架 <span class="pill">必选</span></label><select id="asset-harness"><option value="">请选择框架</option><option value="claude" ${d.assetHarness==='claude'?'selected':''}>Claude Code</option><option value="codex" ${d.assetHarness==='codex'?'selected':''}>Codex</option></select></div><div class="field"><label class="field-label" for="asset-model">模型版本 <span class="pill">必选</span></label><select id="asset-model">${options('model',d.assetModelId)}</select></div></div><p class="small-note">${!state.assets.model?.length?'请先在「模型服务」添加常用模型。':configured?'已保存此组合；编辑后保存会创建新的 Git 版本。':d.profiles&&Object.keys(d.profiles).length?'此组合尚未配置；可填写内容并保存新版本。':'保存时会把这份内容绑定到所选组合。'}</p>${state.lastProfileCopy&&!configured?'<button class="btn btn-sm" id="copy-profile">复制上一组合内容</button>':''}</div>`;
 }
-function renderForm(type) { return `<div class="editor">${editorHead(type)}${profiledTypes.has(type)?profileChoice():''}${({skill:renderSkillForm,workflow:renderWorkflowForm,prompt:renderPromptForm,agent:renderAgentForm,project:renderProjectForm,model:renderModelForm})[type]()}</div>`; }
+function renderForm(type) { return `<div class="editor">${editorHead(type)}${profiledTypes.has(type)?profileChoice():''}${({skill:renderSkillForm,hook:renderHookForm,hookgroup:renderHookGroupForm,rule:renderRuleForm,workflow:renderWorkflowForm,prompt:renderPromptForm,agent:renderAgentForm,project:renderProjectForm,model:renderModelForm})[type]()}</div>`; }
 function field(label,key,value,opts={}) { return `<div class="field ${opts.wide?'wide':''}"><label class="field-label" for="f-${key}">${label}${opts.required?'<span class="pill">必填</span>':''}</label>${opts.textarea?`<textarea id="f-${key}" data-bind="${key}" ${opts.code?'class="code"':''} placeholder="${escapeHtml(opts.placeholder||'')}">${escapeHtml(value)}</textarea>`:`<input id="f-${key}" data-bind="${key}" value="${escapeHtml(value)}" placeholder="${escapeHtml(opts.placeholder||'')}">`}${opts.hint?`<span class="hint">${opts.hint}</span>`:''}</div>`; }
 function fieldSpec(s, f, variant, compact=false) {
   const value=f[s.key], required=s.required&&variant!=='claude';
@@ -214,10 +225,10 @@ function renderWorkflowForm() { const d=state.draft; d.members ||= (d.skillIds||
 function flowRow(member,i) { return `<div class="suite-member"><div class="suite-member-head"><span class="number">${i+1}</span><select class="flow-skill" aria-label="成员 Skill">${options('skill',member.skillId,'选择 Skill')}</select><button class="flow-remove" title="移除这个 Skill" aria-label="移除这个 Skill">×</button></div><label class="field-label" for="suite-role-${i}">在套件中的定位和作用</label><textarea class="flow-role" id="suite-role-${i}" placeholder="例如：先整理输入文件结构；处理文件分析请求时调用">${escapeHtml(member.role||'')}</textarea></div>`; }
 function renderPromptForm() { const d=state.draft; return `<div class="form-grid">${field('提示词名称','title',d.title,{required:true})}<div class="field"><label class="field-label">层级</label><select id="scope"><option value="global" ${d.scope==='global'?'selected':''}>通用</option><option value="model" ${d.scope==='model'?'selected':''}>模型</option><option value="software" ${d.scope==='software'?'selected':''}>Harness 框架</option><option value="project" ${d.scope==='project'?'selected':''}>项目</option></select></div><div class="field wide" id="target-wrap">${targetControl(d)}</div>${field('说明','description',d.description,{wide:true})}${field('提示词正文','content',d.content,{wide:true,textarea:true,code:true,required:true})}</div><div class="callout" style="margin-top:19px">组合顺序固定为：通用 → 模型 → Harness 框架 → 项目。同层按名称排序；Agent 也可显式关联提示词。</div>`; }
 function targetControl(d) { if(d.scope==='global') return '<span class="small-note">通用层适用于所有组合。</span>'; const choice=d.scope==='model'?`<select id="target">${options('model',d.target)}</select>`:d.scope==='project'?`<select id="target">${options('project',d.target)}</select>`:`<select id="target"><option value="">请选择</option><option value="claude" ${d.target==='claude'?'selected':''}>Claude Code</option><option value="codex" ${d.target==='codex'?'selected':''}>Codex</option></select>`; return `<label class="field-label">适用对象</label>${choice}`; }
-function renderAgentForm() { const d=state.draft, harness=d.assetHarness||d.harness||'claude', selected=d.tools||[], unknown=selected.filter(name=>!catalogNames(harness).has(name)); return `<div class="form-grid">${field('Agent 名称','title',d.title,{required:true})}${field('说明','description',d.description)}${field('专属指令','instructions',d.instructions,{wide:true,textarea:true,code:true})}</div><div class="section-title">允许的工具</div>${toolSource(harness)}${toolChoices(catalogFor(harness),selected,'data-agent-tool')}${unknown.length?`<div class="tool-custom"><span>已有自定义工具</span>${unknown.map(name=>`<button class="chip" data-remove-agent-tool="${escapeHtml(name)}" title="移除此项">${escapeHtml(name)} ×</button>`).join('')}</div>`:''}<p class="tool-note">${harness==='claude'?'选中的名称会写入 Claude Code 的 permissions.allow，作为预批准规则。':'Codex 未公开通用的单个 Agent 工具白名单；所选工具会写入 Agent 指令，实际可用性取决于当前运行环境。'}</p><div class="section-title">关联 Skills</div>${checkboxList('skill',d.skillIds||[])}<div class="section-title">关联 Skills 套件</div>${checkboxList('workflow',d.workflowIds||[])}<div class="section-title">额外提示词层</div>${checkboxList('prompt',d.promptIds||[])}<div class="section-title">MCP 服务器</div><div id="mcp-list" class="stack">${(d.mcps||[]).map(mcpRow).join('')}</div><button class="btn btn-sm" id="add-mcp" style="margin-top:10px">＋ 添加 MCP</button>`; }
+function renderAgentForm() { const d=state.draft, harness=d.assetHarness||d.harness||'claude', selected=d.tools||[], unknown=selected.filter(name=>!catalogNames(harness).has(name)); return `<div class="form-grid">${field('Agent 名称','title',d.title,{required:true})}${field('说明','description',d.description)}${field('专属指令','instructions',d.instructions,{wide:true,textarea:true,code:true})}</div><div class="section-title">允许的工具</div>${toolSource(harness)}${toolChoices(catalogFor(harness),selected,'data-agent-tool')}${unknown.length?`<div class="tool-custom"><span>已有自定义工具</span>${unknown.map(name=>`<button class="chip" data-remove-agent-tool="${escapeHtml(name)}" title="移除此项">${escapeHtml(name)} ×</button>`).join('')}</div>`:''}<p class="tool-note">${harness==='claude'?'选中的名称会写入 Claude Code 的 permissions.allow，作为预批准规则。':'Codex 未公开通用的单个 Agent 工具白名单；所选工具会写入 Agent 指令，实际可用性取决于当前运行环境。'}</p><div class="section-title">关联 Skills</div>${checkboxList('skill',d.skillIds||[])}<div class="section-title">关联 Skills 套件</div>${checkboxList('workflow',d.workflowIds||[])}<div class="section-title">额外提示词层</div>${checkboxList('prompt',d.promptIds||[])}<div class="section-title">关联单个 Hook</div>${deployCheckboxList('hook',d.hookIds||[],harness,'')}<div class="section-title">关联 Hooks 组</div>${deployCheckboxList('hookgroup',d.hookGroupIds||[],harness,'')}${harness==='claude'?`<div class="section-title">关联 Rules</div>${checkboxList('rule',d.ruleIds||[])}`:''}<div class="section-title">MCP 服务器</div><div id="mcp-list" class="stack">${(d.mcps||[]).map(mcpRow).join('')}</div><button class="btn btn-sm" id="add-mcp" style="margin-top:10px">＋ 添加 MCP</button>`; }
 function checkboxList(type, selected) { const all=state.assets[type]||[]; return all.length?`<div class="chips">${all.map(a=>`<label class="chip"><input type="checkbox" data-link="${type}" value="${a.id}" ${selected.includes(a.id)?'checked':''}> ${escapeHtml(a.title)}</label>`).join('')}</div>`:`<div class="small-note">尚无${labels[type]}，可先到左侧新建。</div>`; }
 function mcpRow(m={name:'',command:'',args:[],env:{}}) { return `<div class="stack-row mcp-row" style="display:grid;grid-template-columns:1fr 1fr auto"><input class="mcp-name" value="${escapeHtml(m.name)}" placeholder="名称，如 filesystem"><input class="mcp-command" value="${escapeHtml(m.command)}" placeholder="命令，如 npx"><button class="mcp-remove">×</button><input class="mcp-args" value="${escapeHtml((m.args||[]).join(' '))}" placeholder="参数，以空格分隔"><input class="mcp-env" value="${escapeHtml(Object.entries(m.env||{}).map(([k,v])=>`${k}=${v}`).join('; '))}" placeholder="环境变量 KEY=value; KEY2=value"></div>`; }
-function renderProjectForm() { const d=state.draft; return `<div class="form-grid">${field('项目名称','title',d.title,{required:true})}${field('说明','description',d.description,{wide:true,textarea:true})}<div class="field wide"><label class="field-label" for="f-directory">本机项目路径 <span class="pill gray">仅保存在这台电脑</span></label><div class="path-picker"><input id="f-directory" value="${escapeHtml(d.directory||'')}" placeholder="待分配 · 点击右侧选择文件夹" readonly><button class="btn" id="pick-project-directory" type="button">选择文件夹</button>${d.directory?'<button class="btn btn-sm" id="clear-project-directory" type="button">清除</button>':''}</div><span class="hint">选择后自动保存在这台电脑；新项目在保存资产版本时一并记录。只有一键应用时才写入所选目录。</span></div></div><div class="section-title">默认应用的 Skills 套件</div>${checkboxList('workflow',d.suiteIds||[])}<div class="callout" style="margin-top:20px">资产始终保存在用户目录的 Agent_assets_manager。项目路径不上传 GitHub；可稍后再分配。</div>`; }
+function renderProjectForm() { const d=state.draft; return `<div class="form-grid">${field('项目名称','title',d.title,{required:true})}${field('说明','description',d.description,{wide:true,textarea:true})}<div class="field wide"><label class="field-label" for="f-directory">本机项目路径 <span class="pill gray">仅保存在这台电脑</span></label><div class="path-picker"><input id="f-directory" value="${escapeHtml(d.directory||'')}" placeholder="待分配 · 点击右侧选择文件夹" readonly><button class="btn" id="pick-project-directory" type="button">选择文件夹</button>${d.directory?'<button class="btn btn-sm" id="clear-project-directory" type="button">清除</button>':''}</div><span class="hint">选择后自动识别已有资产，逐项确认导入；新项目保存后开始识别。</span></div></div><div class="section-title">默认应用的 Skills 套件</div>${checkboxList('workflow',d.suiteIds||[])}<div class="section-title">默认应用的 Claude Code Rules</div>${checkboxList('rule',d.ruleIds||[])}<div class="section-title">识别项目现有资产</div><p class="small-note">逐项确认导入 Skills、Claude Rules、系统提示词、Claude Agent 和命令 Hooks。已确认的相同内容不会重复导入；源文件改变后会重新等待确认。</p><div class="quick-links"><button class="btn" id="project-discovery" ${!d.id||!d.directory?'disabled':''}>识别 / 继续确认</button><button class="btn btn-sm" id="project-discovery-skipped" ${!d.id||!d.directory?'disabled':''}>重新查看已跳过项</button></div><div class="section-title">当前配置资产</div><p class="small-note">查看此项目实际写入的资产与文件状态。默认关联需在一键生效后才会写入项目。</p><div class="quick-links"><button class="btn" id="project-configuration-refresh" ${!d.id||!d.directory?'disabled':''}>刷新配置资产</button></div><div id="project-configuration" aria-live="polite">${!d.id?'保存项目后可查看。':!d.directory?'请先分配本机项目路径。':'正在读取…'}</div><div class="callout" style="margin-top:20px">资产始终保存在用户目录的 Agent_assets_manager。项目路径不上传 GitHub；可稍后再分配。</div>`; }
 function renderModelForm() { const d=state.draft; return `<div class="form-grid">${field('配置名称','title',d.title,{required:true})}${field('模型 ID','model',d.model,{required:true,placeholder:'claude-sonnet-4-5'})}${field('Anthropic 协议 API 地址','baseUrl',d.baseUrl,{required:true,wide:true,placeholder:'https://api.anthropic.com'})}<div class="field wide"><label class="field-label">API Key <span class="pill gray">本机私有</span></label><input id="api-key" type="password" value="" autocomplete="new-password" placeholder="${d.hasKey?'已保存；留空表示不修改':'输入 API Key'}"><span class="hint">Key 不进入 Git 版本库，页面不会回显。请只连接你信任的服务地址。</span></div>${field('说明','description',d.description,{wide:true})}</div>`; }
 function bindForm(type) {
   const d=state.draft;
@@ -249,6 +260,9 @@ function bindForm(type) {
     $('#copy-profile')?.addEventListener('click',()=>{for(const [field,value] of Object.entries(state.lastProfileCopy||{})) d[field]=deep(value);if(type==='agent'){d.harness=d.assetHarness;d.modelId=d.assetModelId;}render();});
   }
   if(type==='skill') bindSkill();
+  if(type==='hook') bindHook();
+  if(type==='hookgroup') bindHookGroup();
+  if(type==='rule') bindRule();
   if(type==='workflow') bindWorkflow();
   if(type==='prompt') bindPrompt();
   if(type==='agent') bindAgent();
@@ -256,6 +270,114 @@ function bindForm(type) {
   if(type==='model') $('#api-key').oninput=e=>d.apiKey=e.target.value;
 }
 function currentVariant() { return state.draft.variants[state.variant]; }
+function renderRuleForm() {
+  const d=state.draft;
+  return `<div class="form-grid">${field('规则名称','title',d.title,{required:true})}${field('用途说明','description',d.description)}${field('规则文件名','fileName',d.fileName,{required:true,hint:'例如 api.md。生效时写入项目 .claude/rules/ 下的助手管理目录。'})}<div class="field"><label class="field-label">目标软件</label><div class="callout">Claude Code · 适用于所有模型</div></div><div class="field wide"><label class="field-label" for="rule-paths">适用文件（可选）</label><textarea id="rule-paths" class="code" rows="3" placeholder="src/api/**/*.ts\ntests/**/*.test.ts">${escapeHtml((d.paths||[]).join('\n'))}</textarea><span class="hint">每行一个相对于项目根目录的 glob；留空表示整个项目。会生成 YAML 的 paths 字段。</span></div>${field('规则正文','content',d.content,{wide:true,textarea:true,code:true,required:true,hint:'填写 Markdown 规范；YAML 的 paths 由上方生成。'})}</div><div class="quick-links"><button class="btn" id="rule-import-file">导入 Rules 文件</button><button class="btn" id="rule-import-directory">导入 .claude/rules 文件夹</button><button class="btn" id="rule-validate">检查格式</button><input id="rule-file-upload" type="file" accept=".md" multiple hidden><input id="rule-directory-upload" type="file" webkitdirectory directory multiple hidden></div><div id="rule-validation" class="status-line"></div><p class="small-note">Rules 提供自然语言行为规范；不会执行脚本。修改适用范围或内容后，需要再次生效。</p>`;
+}
+function bindRule() {
+  $('#rule-paths').oninput=e=>state.draft.paths=e.target.value.split(/\r?\n/).map(p=>p.trim()).filter(Boolean);
+  $('#rule-validate').onclick=async()=>{try{await api('rule-validate','POST',{asset:state.draft});$('#rule-validation').textContent='✓ 格式检查通过';}catch(error){$('#rule-validation').textContent=error.message;}};
+  $('#rule-import-file').onclick=()=>$('#rule-file-upload').click();
+  $('#rule-import-directory').onclick=()=>$('#rule-directory-upload').click();
+  $('#rule-file-upload').onchange=e=>importRules(e.target.files,false);
+  $('#rule-directory-upload').onchange=e=>importRules(e.target.files,true);
+}
+async function importRules(fileList,directory) {
+  const files=[...fileList].filter(file=>file.name.endsWith('.md')&&(!directory||/(?:^|\/)rules\//.test(file.webkitRelativePath||'')));
+  if(!files.length)return notice(directory?'请选择 .claude/rules 中的 rules 文件夹。':'请选择 .md 规则文件。',true);
+  if(files.length>100)return notice('一次最多导入 100 条规则。',true);
+  try {
+    const entries=[];
+    for(const file of files){if(file.size>200000)throw Error(`${file.name} 超过 200 KB`);entries.push({...await api('import-rule','POST',{fileName:file.name,content:await file.text()}),source:file.webkitRelativePath||file.name});}
+    showModal('导入 Claude Code Rules',`<p class="small-note">只导入规则 Markdown。确认后可编辑内容；未知 YAML 字段不会写入新规则。</p><div class="history">${entries.map((entry,i)=>`<div class="history-row"><label class="chip"><input type="checkbox" data-import-rule="${i}" checked>${escapeHtml(entry.source)}</label><p>${entry.asset.paths.length?escapeHtml(entry.asset.paths.join('、')):'整个项目'}${entry.ignoredFields.length?` · 忽略字段：${escapeHtml(entry.ignoredFields.join('、'))}`:''}</p><details><summary>查看正文</summary><pre class="markdown-preview">${escapeHtml(entry.asset.content)}</pre></details></div>`).join('')}</div><div class="modal-footer"><button class="btn btn-primary" id="rule-import-confirm">确认导入</button></div>`);
+    $('#rule-import-confirm').onclick=async()=>{
+      const chosen=$$('[data-import-rule]:checked').map(input=>entries[Number(input.dataset.importRule)].asset);
+      if(!chosen.length)return notice('请选择至少一条规则',true);
+      if(chosen.length===1){modal.close();state.selected=null;state.draft=deep(chosen[0]);render();notice('已导入到编辑器，检查后保存版本。');return;}
+      modal.close();const message=await askVersionMessage('保存导入的 Rules');if(message===null)return;
+      let saved=0;
+      try{for(const asset of chosen){await api('rule','POST',{asset,message});saved++;}await refresh();notice(`已导入 ${saved} 条 Rules。`);}catch(error){await refresh();notice(`已保存 ${saved} 条；${error.message}`,true);}
+    };
+  }catch(error){notice(error.message,true);}
+}
+async function loadProjectConfiguration() {
+  const id=state.draft?.id, target=$('#project-configuration');
+  if(!id||!target)return;
+  target.textContent='正在读取…';
+  try {
+    const config=await api(`project-configuration?projectId=${encodeURIComponent(id)}`);
+    if(state.section!=='project'||state.draft?.id!==id||$('#project-configuration')!==target)return;
+    const statuses={unchanged:'与生效时一致',modified:'文件已修改',missing:'文件缺失',invalid:'目标不是文件',unverified:'旧记录，未校验内容'};
+    target.innerHTML=`<p class="small-note">以下为本助手的实际生效记录与当前文件检查结果。配置写入不代表目标 Agent 已加载；用户级配置不在此视图中。</p>${config.deployments.map(item=>`<section class="resource-group"><div class="resource-group-head"><strong>${item.software==='claude'?'Claude Code':'Codex'}</strong><span class="pill gray">${item.applied?'已记录生效':'尚无生效记录'}</span></div>${item.error?`<p class="dialog-error">${escapeHtml(item.error)}</p>`:`${item.updatedAt?`<p class="small-note">生效时间：${new Date(item.updatedAt).toLocaleString('zh-CN')}${item.modelTitle?` · ${escapeHtml(item.modelTitle)}`:''}</p>`:''}${item.legacy?'<p class="small-note">这是旧版生效记录，缺少当时的 Agent、模型或版本信息；再次生效后会补齐。</p>':''}${item.assets.length?`<div class="history">${item.assets.map(asset=>`<div class="history-row"><strong>${escapeHtml(labels[asset.type]||asset.type)} · ${escapeHtml(asset.title)}</strong><p>${asset.version?`应用版本 ${escapeHtml(asset.version.slice(0,7))}`:'旧记录未记录版本'}${asset.deleted?' · 资产已从库中删除':asset.hasNewVersion?' · 资产库已有更新':''}</p>${!asset.deleted?`<button class="btn btn-sm" data-project-asset-type="${escapeHtml(asset.type)}" data-project-asset-id="${escapeHtml(asset.id)}">查看资产</button>`:''}</div>`).join('')}</div>`:'<p class="small-note">没有助手管理的资产记录。</p>'}${item.tools.length?`<p class="small-note">工具：${escapeHtml(item.tools.join('、'))}</p>`:''}${item.mcps.length?`<p class="small-note">MCP：${escapeHtml(item.mcps.join('、'))}</p>`:''}${item.files.length?`<details><summary>查看 ${item.files.length} 个已写入文件的状态</summary><div class="history">${item.files.map(file=>`<div class="history-row"><span class="scope-path">${escapeHtml(file.path)}</span><p>${statuses[file.status]||escapeHtml(file.status)}</p></div>`).join('')}</div></details>`:''}`}</section>`).join('')}${config.externalRules.length?`<div class="section-title">项目中其他 Rules 文件</div><p class="small-note">以下文件不在当前助手生效记录中，未自动接管。</p>${config.externalRules.map(rule=>`<p class="scope-path">${escapeHtml(rule.path)}</p>`).join('')}`:''}${config.externalRulesError?`<p class="dialog-error">${escapeHtml(config.externalRulesError)}</p>`:''}`;
+    $$('[data-project-asset-id]',target).forEach(button=>button.onclick=()=>{selectSection(button.dataset.projectAssetType);selectAsset(button.dataset.projectAssetId);});
+  }catch(error){if($('#project-configuration')===target)target.textContent=error.message;}
+}
+function hookTemplate(event) {
+  const start=`import fs from 'node:fs';\nconst input = JSON.parse(fs.readFileSync(0, 'utf8'));\n\n`;
+  if(event==='PreToolUse') return start+`// 示例：检查工具参数。仅作为演示，不能覆盖所有命令写法。\nconst command = input.tool_input?.command || '';\nif (/rm\\s+-rf\\b|Remove-Item.*-Recurse/i.test(command)) {\n  console.log(JSON.stringify({ hookSpecificOutput: {\n    hookEventName: 'PreToolUse', permissionDecision: 'deny',\n    permissionDecisionReason: '此命令需要先人工检查目标目录。'\n  } }));\n}\n`;
+  if(event==='Stop') return start+`// 防止结束检查反复要求继续。\nif (input.stop_hook_active) process.exit(0);\n// 检查完成后退出 0；需要继续时输出：\n// console.log(JSON.stringify({ decision: 'block', reason: '请完成剩余检查。' }));\n`;
+  if(['SessionStart','UserPromptSubmit','SubagentStart'].includes(event)) return start+`console.log(JSON.stringify({ hookSpecificOutput: {\n  hookEventName: '${event}', additionalContext: '请按当前项目约定完成任务。'\n} }));\n`;
+  return start+`// 在这里处理事件；无输出并退出 0 表示没有额外决定。\nprocess.exit(0);\n`;
+}
+function hookEventInfo(d=state.draft) { return (state.hookEvents||[]).find(e=>e.name===d.event); }
+function hookInput(d=state.draft) {
+  return {session_id:'simulation',hook_event_name:d.event,permission_mode:'default',...(hookEventInfo(d)?.matchField?{[hookEventInfo(d).matchField]:({source:'startup',trigger:'manual',tool_name:'Bash',agent_type:'general-purpose',reason:d.harness==='codex'?'other':'prompt_input_exit',notification_type:'idle_prompt'})[hookEventInfo(d).matchField]||'user_settings'}:{}),...(['PreToolUse','PostToolUse','PostToolUseFailure','PermissionRequest'].includes(d.event)?{tool_use_id:'simulation-tool',tool_input:{command:'npm test'},...(d.event==='PostToolUse'?{tool_response:{exit_code:0,stdout:'Tests passed'}}:{})}:{}),...(d.event==='UserPromptSubmit'?{prompt:'请检查这个项目'}:{}),...(['Stop','SubagentStop'].includes(d.event)?{stop_hook_active:false,last_assistant_message:'已完成检查。'}:{})};
+}
+function renderHookGroupForm() {
+  const d=state.draft;d.members||=[];
+  const hooks=(state.assets.hook||[]).filter(h=>h.harness===d.harness);
+  const used=new Set(d.members.map(m=>m.hookId));
+  return `<div class="form-grid">${field('Hooks 组名称','title',d.title,{required:true,wide:true})}<div class="field"><label class="field-label" for="hookgroup-harness">目标软件</label><select id="hookgroup-harness"><option value="claude" ${d.harness==='claude'?'selected':''}>Claude Code</option><option value="codex" ${d.harness==='codex'?'selected':''}>Codex</option></select></div>${field('共同用途','description',d.description,{required:true,wide:true,textarea:true,placeholder:'例如：在编辑前保护重要文件，编辑后检查格式，结束时检查测试结果'})}</div><div class="section-title">组内 Hooks · ${d.members.length} 个</div><p class="small-note">每个成员引用一个已保存的 Hook，可以说明它在这个用途中的作用。同组成员需适用于同一软件。</p><div class="stack suite-members">${d.members.map((m,i)=>`<div class="suite-member"><div class="suite-member-head"><span class="number">${i+1}</span><select data-hook-member="${i}" aria-label="成员 Hook ${i+1}"><option value="">选择 Hook</option>${m.hookId&&!hooks.some(h=>h.id===m.hookId)?`<option value="${escapeHtml(m.hookId)}" selected>已删除或不适用的 Hook</option>`:''}${hooks.map(h=>`<option value="${h.id}" ${h.id===m.hookId?'selected':''} ${used.has(h.id)&&h.id!==m.hookId?'disabled':''}>${escapeHtml(h.title)} · ${escapeHtml(h.event)}</option>`).join('')}</select><button data-remove-hook-member="${i}" class="btn btn-sm" aria-label="移除成员 ${i+1}">×</button></div><label class="field-label" for="hook-role-${i}">在组中的作用（可选）</label><textarea data-hook-role="${i}" id="hook-role-${i}" placeholder="说明此 Hook 负责哪一部分">${escapeHtml(m.role||'')}</textarea></div>`).join('')}</div><button class="btn btn-sm" id="add-hook-member" ${d.members.length>=100?'disabled':''} style="margin-top:10px">＋ 添加 Hook</button><div class="callout" style="margin-top:18px">整组应用会部署全部成员，每个 Hook 仍按自己的事件、匹配条件和同步/异步设置执行。这里的成员排列不代表固定执行顺序；重复引用的 Hook 只部署一次。</div>`;
+}
+function bindHookGroup() {
+  const d=state.draft;
+  $('#hookgroup-harness').onchange=async event=>{
+    const harness=event.target.value;
+    if(d.members.length&&!await askConfirm('切换 Hooks 组的目标软件','切换后将清空当前成员，重新选择适用于目标软件的 Hook。')){event.target.value=d.harness;return;}
+    d.harness=harness;d.members=[];render();
+  };
+  $('#add-hook-member').onclick=()=>{d.members.push({hookId:'',role:''});render();};
+  $$('[data-hook-member]').forEach(input=>input.onchange=()=>{d.members[Number(input.dataset.hookMember)].hookId=input.value;render();});
+  $$('[data-hook-role]').forEach(input=>input.oninput=()=>{d.members[Number(input.dataset.hookRole)].role=input.value;});
+  $$('[data-remove-hook-member]').forEach(button=>button.onclick=()=>{d.members.splice(Number(button.dataset.removeHookMember),1);render();});
+}
+function renderHookForm() {
+  const d=state.draft, events=(state.hookEvents||[]).filter(e=>!e.harness||e.harness===d.harness), info=hookEventInfo(d);
+  return `<div class="form-grid">${field('Hook 名称','title',d.title,{required:true})}${field('用途说明','description',d.description)}
+    <div class="field"><label class="field-label" for="hook-harness">目标软件</label><select id="hook-harness"><option value="claude" ${d.harness==='claude'?'selected':''}>Claude Code</option><option value="codex" ${d.harness==='codex'?'selected':''}>Codex</option></select><span class="hint">项目级 Hook，适用于此软件的所有模型。</span></div>
+    <div class="field"><label class="field-label" for="hook-event">触发时机</label><select id="hook-event">${events.map(e=>`<option value="${e.name}" ${d.event===e.name?'selected':''}>${e.label} · ${e.name}</option>`).join('')}</select></div>
+    ${info?.matchField?field('匹配条件（可选）','matcher',d.matcher,{hint:`正则表达式，筛选 ${escapeHtml(info.matchField)}；留空匹配全部。工具示例：Bash、Edit|Write、mcp__.*`}):'<p class="small-note">此事件不使用匹配条件。</p>'}
+    <div class="field"><label class="field-label" for="hook-async">执行方式</label><select id="hook-async"><option value="false" ${!d.async?'selected':''}>同步 · Agent 等待完成</option><option value="true" ${d.async?'selected':''} ${d.harness==='codex'&&d.event==='SessionEnd'?'disabled':''}>异步 · 在后台运行</option></select></div>
+    <div class="field"><label class="field-label" for="hook-timeout">超时（秒）</label><input id="hook-timeout" type="number" min="1" max="${d.harness==='codex'&&['SessionEnd','Interrupt'].includes(d.event)?3:600}" value="${d.timeout}"></div>
+    <div class="field"><label class="field-label" for="hook-runtime">脚本运行环境</label><select id="hook-runtime">${[['node','Node.js'],['python','Python'],['powershell','PowerShell'],['bash','Bash']].map(([key,label])=>`<option value="${key}" ${d.runtime===key?'selected':''}>${label}</option>`).join('')}</select><span class="hint">目标电脑需要安装所选运行环境。</span></div>
+    ${field('入口脚本','entry',d.entry,{hint:'相对路径，例如 scripts/main.mjs；资源文件可以一起保存。'})}</div>
+    <div class="callout" id="hook-effect">${d.async?'后台脚本与 Agent 并行；返回的允许、拒绝或继续决定不能控制当前操作。':d.event==='PreToolUse'?'脚本完成后再执行工具，可通过合法输出拒绝工具调用。':d.event==='Stop'?'在 Agent 准备结束时检查；拒绝结束会让 Agent 继续，需检查 stop_hook_active 避免循环。':'Agent 在触发点等待脚本完成；具体可返回的决定取决于所选事件。'}<br><small>脚本只有在目标软件触发事件或你手动运行测试时执行。保存资产不会执行脚本。</small></div>
+    <div class="section-title">脚本文件</div><div class="resource-groups">${renderResourceGroup('scripts',d.files)}</div>
+    <div class="quick-links"><button class="btn btn-sm" id="hook-template">填入 Node.js 示例</button><button class="btn" id="hook-validate">检查与预览配置</button></div>
+    <div class="section-title">模拟测试</div><p class="small-note">点击运行会真实执行当前脚本。可以选择测试项目作为工作目录；最多等待 30 秒。此测试检查脚本和输出，不启动 Agent。</p>
+    <div class="field"><label class="field-label" for="hook-test-project">测试项目（可选）</label><select id="hook-test-project">${options('project','','使用临时工作目录')}</select></div>
+    <div class="field"><label class="field-label" for="hook-test-input">事件输入 JSON</label><textarea class="code" id="hook-test-input">${escapeHtml(d.testInput||JSON.stringify(hookInput(d),null,2))}</textarea></div>
+    <div class="quick-links"><button class="btn btn-sm" id="hook-reset-input">重置事件示例</button><button class="btn btn-primary" id="hook-run-test">运行模拟测试</button></div><div id="hook-test-result" aria-live="polite"></div>
+    <p class="small-note" style="margin-top:20px"><a href="${d.harness==='codex'?'https://learn.chatgpt.com/docs/hooks':'https://code.claude.com/docs/en/hooks'}" target="_blank" rel="noopener noreferrer">查看官方事件与输入输出说明 ↗</a></p>`;
+}
+function bindHook() {
+  const d=state.draft;
+  $('#hook-harness').onchange=e=>{d.harness=e.target.value;if(!hookEventInfo(d)||hookEventInfo(d).harness&&hookEventInfo(d).harness!==d.harness)d.event='PreToolUse';normalize();};
+  $('#hook-event').onchange=e=>{d.event=e.target.value;d.matcher='';normalize();};
+  function normalize(){if(!hookEventInfo(d)?.matchField)d.matcher='';if(d.harness==='codex'&&['SessionEnd','Interrupt'].includes(d.event))d.timeout=Math.min(d.timeout,3);if(d.harness==='codex'&&d.event==='SessionEnd')d.async=false;delete d.testInput;render();}
+  $('#hook-async').onchange=e=>{d.async=e.target.value==='true';render();};
+  $('#hook-timeout').oninput=e=>d.timeout=Number(e.target.value);
+  $('#hook-runtime').onchange=e=>{d.runtime=e.target.value;};
+  $('#hook-test-input').oninput=e=>d.testInput=e.target.value;
+  $('#hook-reset-input').onclick=()=>{delete d.testInput;$('#hook-test-input').value=JSON.stringify(hookInput(d),null,2);};
+  $('#hook-template').onclick=async()=>{if(!await askConfirm('填入示例','将替换 scripts/main.mjs 的内容，并使用 Node.js 运行。其他文件会保留。'))return;d.runtime='node';d.entry='scripts/main.mjs';d.files[d.entry]=hookTemplate(d.event);render();};
+  bindResources();
+  $('[data-add-resource="scripts"]').onclick=()=>{showModal('添加脚本',`<div class="field"><label class="field-label" for="hook-file-name">文件名</label><input id="hook-file-name" placeholder="helper.mjs"></div><div class="field"><label class="field-label" for="hook-file-content">内容</label><textarea class="code" id="hook-file-content"></textarea></div><button class="btn btn-primary" id="hook-file-add">添加</button>`);$('#hook-file-add').onclick=()=>{const name=$('#hook-file-name').value.trim();if(!/^[A-Za-z0-9_./-]+$/.test(name)||name.split('/').some(p=>!p||p==='.'||p==='..'))return notice('请输入安全的相对文件名',true);const full='scripts/'+name;if(Object.hasOwn(d.files,full))return notice('此文件已存在',true);d.files[full]=$('#hook-file-content').value;modal.close();render();};};
+  $('[data-import-resource="scripts"]').onclick=()=>$('[data-resource-upload="scripts"]').click();
+  $('[data-resource-upload="scripts"]').onchange=async e=>{try{for(const file of e.target.files){if(file.size>1_000_000)throw new Error('脚本文件最多 1 MB');const name='scripts/'+file.name;if(Object.hasOwn(d.files,name))throw new Error('同名脚本已存在：'+file.name);d.files[name]=await file.text();}render();}catch(error){notice(error.message,true);}};
+  $('#hook-validate').onclick=async()=>{try{const result=await api('hook-validate','POST',{asset:d});showModal('Hook 配置预览',`<p class="small-note">基础格式检查通过。这里使用示例路径，项目生效预览会显示实际路径。</p><pre class="markdown-preview">${escapeHtml(JSON.stringify(result.config,null,2))}</pre>`);}catch(error){notice(error.message,true);}};
+  $('#hook-run-test').onclick=async()=>{const button=$('#hook-run-test');try{const input=JSON.parse($('#hook-test-input').value);button.disabled=true;button.textContent='测试中…';const result=await api('hook-test','POST',{asset:d,input,projectId:$('#hook-test-project').value});$('#hook-test-result').innerHTML=`<div class="callout" style="margin-top:14px"><strong>${escapeHtml(result.summary)}</strong>${result.matched?`<br>退出码：${escapeHtml(result.exitCode??'无')} · 耗时：${result.durationMs} ms`:''}</div>${result.matched?`<pre class="markdown-preview">${escapeHtml(JSON.stringify(result,null,2))}</pre>`:''}`;}catch(error){notice(error.message,true);}finally{button.disabled=false;button.textContent='运行模拟测试';}};
+}
 function ensureVariant(name) { if(!state.draft.variants[name]) { const variant=deep(state.draft.variants.common); if(name==='codex') delete variant.frontmatter['allowed-tools']; state.draft.variants[name]=variant; } }
 function copySkillName(name) {
   if(!name) return name;
@@ -509,6 +631,11 @@ PDF 文件与输出格式。
 确认输出非空，页数与输入一致，并抽查一页内容。`; }
 function bindWorkflow() { const d=state.draft; d.members ||= (d.skillIds||[]).map(skillId=>({skillId,role:''})); $('#add-step').onclick=()=>{d.members.push({skillId:'',role:''});render();}; $$('.suite-member').forEach((row,i)=>{ $('.flow-skill',row).onchange=e=>d.members[i].skillId=e.target.value; $('.flow-role',row).oninput=e=>d.members[i].role=e.target.value; $('.flow-remove',row).onclick=()=>{d.members.splice(i,1);render();}; }); }
 function bindProject() {
+  $('#project-discovery')?.addEventListener('click',()=>reviewProjectAssets(state.draft.id));
+  $('#project-discovery-skipped')?.addEventListener('click',()=>reviewProjectAssets(state.draft.id,true));
+  $$('[data-link="rule"]').forEach(input=>input.onchange=()=>{state.draft.ruleIds=$$('[data-link="rule"]:checked').map(input=>input.value);});
+  $('#project-configuration-refresh').onclick=loadProjectConfiguration;
+  if(state.draft.id&&state.draft.directory)loadProjectConfiguration();
   $$('[data-link="workflow"]').forEach(input=>input.onchange=()=>{state.draft.suiteIds=$$('[data-link="workflow"]:checked').map(item=>item.value);});
   $('#pick-project-directory').onclick=async()=>{
     const button=$('#pick-project-directory');button.disabled=true;button.textContent='等待选择…';
@@ -521,8 +648,9 @@ function bindProject() {
         const project=await api(`project/${draft.id}/local-path`,'POST',{directory:result.directory});
         state.assets.project=state.assets.project.map(item=>item.id===project.id?project:item);
         notice('已选择并保存本机项目路径。');
-      } else notice('已选择文件夹；保存项目版本后即可使用。');
+      } else notice('已选择文件夹；保存项目后会自动识别已有资产。');
       render();
+      if(draft.id)await reviewProjectAssets(draft.id);
     } catch(error) { notice(error.message,true); }
     finally { if(button.isConnected){button.disabled=false;button.textContent='选择文件夹';} }
   };
@@ -532,14 +660,116 @@ function bindPrompt() { $('#scope').onchange=e=>{state.draft.scope=e.target.valu
 function bindAgent() {
   const d=state.draft;
   d.harness=d.assetHarness||d.harness||'claude';
+  if(d.harness==='codex')d.ruleIds=[];
   d.modelId=d.assetModelId||d.modelId||'';
   $$('[data-agent-tool]').forEach(input=>input.onchange=()=>{ const custom=(d.tools||[]).filter(name=>!catalogNames(d.harness).has(name)); d.tools=[...$$('[data-agent-tool]:checked').map(item=>item.dataset.agentTool),...custom]; });
   $$('[data-remove-agent-tool]').forEach(button=>button.onclick=()=>{ d.tools=d.tools.filter(name=>name!==button.dataset.removeAgentTool); render(); });
-  $$('[data-link]').forEach(el=>el.onchange=()=>{const key={skill:'skillIds',workflow:'workflowIds',prompt:'promptIds'}[el.dataset.link];d[key]=$$(`[data-link="${el.dataset.link}"]:checked`).map(x=>x.value);});
+  $$('[data-link]').forEach(el=>el.onchange=()=>{const key={skill:'skillIds',workflow:'workflowIds',prompt:'promptIds',hook:'hookIds',hookgroup:'hookGroupIds',rule:'ruleIds'}[el.dataset.link];d[key]=$$(`[data-link="${el.dataset.link}"]:checked`).map(x=>x.value);});
   $('#add-mcp').onclick=()=>{d.mcps.push({name:'',command:'',args:[],env:{}});render();};
   $$('.mcp-row').forEach((row,i)=>{for(const key of ['name','command','args','env']) $(`.mcp-${key}`,row).oninput=e=>{if(key==='args')d.mcps[i].args=e.target.value.split(/\s+/).filter(Boolean);else if(key==='env'){const env={};for(const pair of e.target.value.split(';')){const at=pair.indexOf('=');if(at>0)env[pair.slice(0,at).trim()]=pair.slice(at+1).trim();}d.mcps[i].env=env;}else d.mcps[i][key]=e.target.value;}; $('.mcp-remove',row).onclick=()=>{d.mcps.splice(i,1);render();}; });
 }
-async function saveCurrent() { try { const d=state.draft; if(profiledTypes.has(state.section)&&(!d.assetHarness||!d.assetModelId)) throw new Error('请同时选择 Harness 框架和模型版本'); const message=await askVersionMessage('保存资产版本'); if(message===null)return; const asset=await api(state.section,'POST',{asset:d,message}); state.selected=asset.id; await refresh(); state.draft=deep(asset); state.profileDrafts={};state.lastProfileCopy=null; render(); notice(`已保存 Git 版本：${message}`); } catch(e){notice(e.message,true);} }
+async function saveCurrent() { try { const d=state.draft; const discover=state.section==='project'&&d.directory&&(!d.id||state.assets.project.find(p=>p.id===d.id)?.directory!==d.directory); if(profiledTypes.has(state.section)&&(!d.assetHarness||!d.assetModelId)) throw new Error('请同时选择 Harness 框架和模型版本'); const message=await askVersionMessage('保存资产版本'); if(message===null)return; const asset=await api(state.section,'POST',{asset:d,message}); state.selected=asset.id; await refresh(); state.draft=deep(asset); state.profileDrafts={};state.lastProfileCopy=null; render(); notice(`已保存 Git 版本：${message}`); if(discover)await reviewProjectAssets(asset.id); } catch(e){notice(e.message,true);} }
+let projectReviewRunning=false;
+async function reviewProjectAssets(projectId,includeSkipped=false,fileScan=null) {
+  if(projectReviewRunning||(!projectId&&!fileScan))return;
+  projectReviewRunning=true;
+  let imported=0,skipped=0;
+  try {
+    const scan=fileScan||await api(`project-discovery?projectId=${encodeURIComponent(projectId)}&includeSkipped=${includeSkipped}`);
+    if(!scan.candidates.length){
+      showModal(fileScan?'Hooks 配置识别':'项目资产识别',`<p>没有待确认的资产。已导入 ${scan.imported} 项，已跳过 ${scan.skipped} 项。</p>${scan.warnings.map(w=>`<p class="small-note">${escapeHtml(w)}</p>`).join('')}<p class="small-note">识别 Skills、Claude Rules、项目指令、Claude Agent 和命令 Hooks 的标准项目目录；其他配置继续保留在原项目。</p>`);
+      return;
+    }
+    for(const [index,item] of scan.candidates.entries()){
+      const preview=item.asset?.content||item.asset?.instructions||Object.values(item.asset?.variants||{})[0]?.body||Object.values(item.asset?.files||{})[0]||'';
+      const metadata={...item.asset};for(const key of ['content','instructions','files','title'])delete metadata[key];
+      if(metadata.variants)metadata.variants=Object.fromEntries(Object.entries(metadata.variants).map(([h,v])=>[h,v.frontmatter]));
+      const configurationPreview=`<details><summary>配置与资源预览</summary><pre class="markdown-preview">${escapeHtml(JSON.stringify(metadata,null,2))}</pre>${Object.entries(item.asset?.files||{}).map(([name,value])=>`<details><summary>${escapeHtml(name)}</summary><pre class="markdown-preview">${escapeHtml(typeof value==='string'?value.slice(0,20000)+(value.length>20000?'\n…仅预览前 20000 字符，导入保留完整内容':''):'二进制资源，导入保留原内容')}</pre></details>`).join('')}</details>`;
+      await refresh();
+      const answer=await new Promise(resolve=>{
+        showModal(`${fileScan?'确认导入 Hook':'确认项目资产'} · ${index+1} / ${scan.candidates.length}`,`<p><span class="pill">${escapeHtml(labels[item.type])}</span> ${escapeHtml(item.harness==='claude'?'Claude Code':'Codex')}</p><p class="small-note">来源：${escapeHtml(item.source)}</p><p class="small-note">确认后保存到资产库，项目原文件保持原样。${fileScan?'关闭后可再次选择原文件，已成功导入的相同 Hook 会跳过。':'关闭此窗口后可从项目页面继续。'}</p>${scan.warnings.map(w=>`<p class="small-note">${escapeHtml(w)}</p>`).join('')}${item.warnings.map(w=>`<div class="callout">${escapeHtml(w)}</div>`).join('')}${item.error?`<div class="dialog-error">${escapeHtml(item.error)}</div>`:''}${item.raw?`<details><summary>原生 Hook 配置</summary><pre class="markdown-preview">${escapeHtml(JSON.stringify(item.raw,null,2))}</pre></details>`:''}${item.importable?`<div class="field"><label class="field-label" for="discovery-title">资产名称</label><input id="discovery-title" value="${escapeHtml(item.title)}"></div><div id="discovery-duplicates" aria-live="polite"></div>${profiledTypes.has(item.type)?`<div class="field"><label class="field-label" for="discovery-model">关联模型版本（可选）</label><select id="discovery-model"><option value="">保留原生资产，暂不关联模型</option>${(state.assets.model||[]).map(m=>`<option value="${m.id}">${escapeHtml(m.title)}</option>`).join('')}</select></div>`:''}<details open><summary>内容预览${item.type==='skill'?` · ${(Object.keys(item.asset.files||{})).length} 个资源文件`:''}</summary><pre class="markdown-preview">${escapeHtml(preview)}</pre></details>${configurationPreview}<div class="field"><label class="field-label" for="discovery-message">版本说明</label><input id="discovery-message" maxlength="200" value="从项目导入现有资产"></div>`:''}<p id="discovery-error" class="dialog-error" role="alert"></p><div class="modal-footer"><button class="btn" id="discovery-pause">稍后继续</button><button class="btn" id="discovery-skip">跳过这一项</button><button class="btn btn-primary" id="discovery-confirm" ${item.importable?'':'disabled'}>确认导入这一项</button></div>`);
+        const updateDuplicates=()=>{
+          const title=$('#discovery-title')?.value.trim();
+          const matches=(state.assets[item.type]||[]).filter(asset=>asset.title.trim()===title);
+          const container=$('#discovery-duplicates');
+          if(!container)return;
+          container.innerHTML=matches.map(existing=>{
+            const differences=[];
+            const compare=(oldValue,newValue,field)=>{
+              if(JSON.stringify(oldValue)===JSON.stringify(newValue))return;
+              if(oldValue&&newValue&&typeof oldValue==='object'&&typeof newValue==='object'&&!Array.isArray(oldValue)&&!Array.isArray(newValue)){
+                for(const key of new Set([...Object.keys(oldValue),...Object.keys(newValue)]))compare(oldValue[key],newValue[key],field?field+'.'+key:key);
+              }else differences.push({field,oldValue,newValue});
+            };
+            const metadata=new Set(['id','type','createdAt','updatedAt','activeVersion','latestUpdatedAt','profiles','hasKey']);
+            const oldAsset=Object.fromEntries(Object.entries(existing).filter(([key])=>!metadata.has(key)));
+            compare(oldAsset,{...item.asset,title},'');
+            const display=value=>value===undefined?'（未设置）':typeof value==='string'?value:JSON.stringify(value,null,2);
+            return `<div class="callout" role="alert"><strong>发现同名${escapeHtml(labels[item.type])}：${escapeHtml(existing.title)}</strong><p>请查看差异，修改名称后导入，或跳过这一项。</p></div><details open><summary>与已登记资产的差异 · ${differences.length} 项</summary>${differences.length?differences.map(change=>`<p><strong>${escapeHtml(change.field)}</strong></p><div class="form-grid"><div><strong>已登记</strong><pre class="diff">${escapeHtml(display(change.oldValue))}</pre></div><div><strong>本次识别</strong><pre class="diff">${escapeHtml(display(change.newValue))}</pre></div></div>`).join(''):'<p class="small-note">内容、配置和资源完全一致。</p>'}</details>`;
+          }).join('');
+          $('#discovery-confirm').disabled=!item.importable||matches.length>0;
+        };
+        $('#discovery-title')?.addEventListener('input',updateDuplicates);
+        updateDuplicates();
+        let settled=false,choice=null;
+        const closed=()=>{if(settled)return;settled=true;resolve(choice);};
+        const finish=value=>{if(settled)return;choice=value;if(modal.open)modal.close();else closed();};
+        modal.addEventListener('close',closed,{once:true});
+        $('#discovery-pause').onclick=()=>finish(null);
+        const act=async action=>{
+          const buttons=$$('#modal-body button');buttons.forEach(b=>b.disabled=true);
+          try{
+            if(fileScan){
+              if(action==='import')await api('hook','POST',{asset:{...item.asset,title:$('#discovery-title').value},message:$('#discovery-message').value});
+            }else await api('project-import','POST',{projectId,key:item.key,fingerprint:item.fingerprint,action,title:$('#discovery-title')?.value,modelId:$('#discovery-model')?.value,message:$('#discovery-message')?.value});
+            finish(action);
+          }catch(error){if(!settled){$('#discovery-error').textContent=error.message;buttons.forEach(b=>b.disabled=false);updateDuplicates();}}
+        };
+        $('#discovery-skip').onclick=()=>act('skip');$('#discovery-confirm').onclick=()=>act('import');
+      });
+      if(answer===null)break;
+      if(answer==='import')imported++;else skipped++;
+    }
+    await refresh();
+    if(state.section==='project'&&state.draft?.id===projectId)render();
+
+    notice(`本次已导入 ${imported} 项，跳过 ${skipped} 项${fileScan?'；剩余项可再次选择原文件导入。':'；可在项目页继续识别。'}`);
+  }catch(error){notice(error.message,true);}
+  finally{projectReviewRunning=false;}
+}
+async function chooseHookImport() {
+  const harness=await modalAnswer('导入 Hooks 配置','<p class="small-note">选择配置对应的软件，然后选择一个或多个 JSON / TOML 文件。只解析 hooks，不导入其他设置。</p><div class="field"><label class="field-label" for="import-hook-harness">配置对应的软件</label><select id="import-hook-harness"><option value="claude">Claude Code · settings.json / settings.local.json / hooks.json</option><option value="codex">Codex · hooks.json / config.toml</option></select></div>','选择配置文件',()=>$('#import-hook-harness').value);
+  if(!harness)return;
+  state.hookImportHarness=harness;
+  const input=$('#hook-config-files');if(input){input.value='';input.click();}
+}
+function importedHookSignature(asset) {
+  return JSON.stringify([asset.harness,asset.event,asset.matcher||'',asset.async,asset.timeout,asset.runtime,asset.entry,Object.entries(asset.files||{}).sort(([a],[b])=>a.localeCompare(b)),asset.nativeOptions?.statusMessage??null,asset.nativeOptions?.additionalContextLimit??null]);
+}
+async function importHookFiles(fileList) {
+  const files=Array.from(fileList||[]);if(!files.length)return;
+  try {
+    if(files.length>10)throw Error('一次最多选择 10 个配置文件');
+    const scan={candidates:[],warnings:[],imported:0,skipped:0};
+    const known=new Set((state.assets.hook||[]).map(importedHookSignature));
+    for(const file of files){
+      if(file.size>512000){scan.warnings.push(`${file.name}：文件超过 500 KB`);continue;}
+      let parsed;
+      try{parsed=await api('import-hooks','POST',{content:await file.text(),fileName:file.name,harness:state.hookImportHarness});}
+      catch(error){scan.warnings.push(`${file.name}：${error.message}`);continue;}
+      for(const item of parsed.candidates){
+        if(item.importable){
+          const signature=importedHookSignature(item.asset);
+          if(known.has(signature)){scan.imported++;continue;}
+          known.add(signature);
+        }
+        scan.candidates.push(item);
+        if(scan.candidates.length>500)throw Error('本次最多识别 500 条 Hook，请分批导入');
+      }
+    }
+    await reviewProjectAssets(null,false,scan);
+  }catch(error){notice(error.message,true);}
+}
 async function deleteCurrent() { if(!await askConfirm('删除资产',`确定删除「${state.draft.title}」？此操作仍可通过 Git 历史恢复。`))return; const message=await askVersionMessage('记录删除原因'); if(message===null)return; try{await api(`${state.section}/${state.draft.id}`,'DELETE',{message});state.draft=null;state.selected=null;await refresh();notice('资产已删除并记录 Git 版本。');}catch(e){notice(e.message,true);} }
 function showModal(title,html) { $('#modal-title').textContent=title;$('#modal-body').innerHTML=html;if(!modal.open)modal.showModal(); }
 function modalAnswer(title,body,submitText,readValue) {
@@ -589,7 +819,7 @@ async function showTrash(type) {
 function aiDialog(mode) { const models=state.assets.model||[]; if(!models.length)return notice('请先在「模型服务」配置 Anthropic 协议模型。',true); showModal(mode==='review'?'Skill 审查':'Skill 改进',`<div class="form-grid"><div class="field wide"><label class="field-label">使用模型</label><select id="ai-model">${options('model','', '请选择模型')}</select></div>${mode==='improve'?`<div class="field wide"><label class="field-label">遇到的问题</label><textarea id="ai-problem" placeholder="例如：用户要求处理扫描件时没有触发这个 Skill"></textarea></div>`:''}</div><div class="modal-footer"><button class="btn btn-primary" id="ai-run">${mode==='review'?'开始审查':'生成改进建议'}</button></div><div id="ai-output"></div>`); $('#ai-run').onclick=async()=>{const modelId=$('#ai-model').value;if(!modelId)return notice('请选择模型',true);const button=$('#ai-run');button.disabled=true;button.textContent='模型处理中…';try{const result=await api(`ai/${mode}`,'POST',{skillId:state.draft.id,software:state.variant,modelId,problem:$('#ai-problem')?.value});$('#ai-output').innerHTML=`<div class="section-title">${mode==='review'?'审查意见':'改进建议'}</div><div class="ai-result">${escapeHtml(result.proposal?.summary||result.text)}</div>${result.proposal?.frontmatter&&result.proposal?.body?'<div class="modal-footer"><button class="btn btn-primary" id="apply-proposal">应用到编辑器</button></div>':''}`;$('#apply-proposal')?.addEventListener('click',()=>{state.draft.variants[state.variant].frontmatter=result.proposal.frontmatter;state.draft.variants[state.variant].body=result.proposal.body;state.draft.variants[state.variant].descriptionParts={what:result.proposal.frontmatter.description||'',when:'',keywords:''};modal.close();render();notice('建议已放入编辑器。请检查并保存 Git 版本。');});}catch(e){notice(e.message,true);}finally{button.disabled=false;button.textContent=mode==='review'?'开始审查':'生成改进建议';}}; }
 function renderSettings() { const d=state.draft; $('#content').innerHTML=`<div class="intro"><div><h2>审查与改进系统提示词</h2><p>这两段指令会作为模型调用的 system 内容，可按你的团队标准修改。</p></div></div><div class="panel editor"><div class="editor-head"><div><h2>模型审查规则</h2><p>所有修改都要求 Git 版本说明</p></div><button class="btn btn-primary" id="settings-save">保存版本</button></div><div class="form-grid">${field('审查系统提示词','reviewSystem',d.reviewSystem,{wide:true,textarea:true,code:true})}${field('改进系统提示词','improveSystem',d.improveSystem,{wide:true,textarea:true,code:true})}</div>${d.id?'<button class="btn btn-sm" id="settings-history" style="margin-top:18px">版本历史</button>':''}</div>`; $$('[data-bind]').forEach(el=>el.oninput=e=>d[el.dataset.bind]=e.target.value); $('#settings-save').onclick=async()=>{const message=await askVersionMessage('保存审查配置');if(message===null)return;try{const saved=await api('settings','POST',{asset:d,message});state.draft=deep(saved);await refresh();notice('审查规则已保存。');}catch(e){notice(e.message,true);}};$('#settings-history')?.addEventListener('click',()=>showHistory('settings',d.id)); }
 function uiProfile(item,software,modelId) { if(!item) return null; if(!item.profiles||!Object.keys(item.profiles).length) return item; const profile=item.profiles[`${software}:${modelId}`]; return profile?{...item,...profile}:null; }
-function deployCheckboxList(type,selected,software,modelId) { const all=(state.assets[type]||[]).filter(item=>uiProfile(item,software,modelId)); return all.length?`<div class="chips">${all.map(item=>`<label class="chip"><input type="checkbox" data-link="${type}" value="${item.id}" ${selected.includes(item.id)?'checked':''}> ${escapeHtml(item.title)}</label>`).join('')}</div>`:'<div class="small-note">这个组合尚无可用资产。</div>'; }
+function deployCheckboxList(type,selected,software,modelId) { const all=(state.assets[type]||[]).filter(item=>['hook','hookgroup','rule'].includes(type)?item.harness===software:uiProfile(item,software,modelId)); return all.length?`<div class="chips">${all.map(item=>`<label class="chip"><input type="checkbox" data-link="${type}" value="${item.id}" ${selected.includes(item.id)?'checked':''}> ${escapeHtml(item.title)}</label>`).join('')}</div>`:'<div class="small-note">这个组合尚无可用资产。</div>'; }
 function deployAgentOptions(selected,software,modelId) { const all=(state.assets.agent||[]).filter(item=>uiProfile(item,software,modelId)); return `<option value="">不指定 Agent</option>${all.map(item=>`<option value="${item.id}" ${item.id===selected?'selected':''}>${escapeHtml(item.title)}</option>`).join('')}`; }
 function deployPromptCandidates() {
   const projectId=$('#deploy-project').value, software=$('#deploy-software').value, modelId=$('#deploy-model').value;
@@ -618,7 +848,13 @@ function updateDeployAvailability() {
   $('#deploy-skill-summary').textContent=`最终部署 ${unique.size} 个不重复的 Skill${allIds.length>unique.size?`；已去除 ${allIds.length-unique.size} 次重复选择`:''}。`;
   const project=(state.assets.project||[]).find(item=>item.id===$('#deploy-project').value);
   $('#deploy-path-hint').textContent=project&&!project.directory?'该项目尚未分配本机路径。请到「项目」中选择本机目录。':project?.directory?`本机目标：${project.directory}`:'先选择目标项目。';
-  $('#deploy-preview').disabled=!project?.directory||!modelId||(!agent&&!unique.size&&!$$('[data-deploy-prompt]:checked').length);
+  const selectedGroupIds=[...$$('[data-link="hookgroup"]:checked').map(input=>input.value),...(agent?.hookGroupIds||[])];
+  const groupHookIds=(state.assets.hookgroup||[]).filter(g=>selectedGroupIds.includes(g.id)).flatMap(g=>(g.members||[]).map(m=>m.hookId));
+  const allHookIds=[...$$('[data-link="hook"]:checked').map(input=>input.value),...(agent?.hookIds||[]),...groupHookIds];
+  const uniqueHooks=new Set(allHookIds);
+  $('#deploy-hook-summary').textContent=`最终部署 ${uniqueHooks.size} 个不重复的 Hook${allHookIds.length>uniqueHooks.size?`；已去除 ${allHookIds.length-uniqueHooks.size} 次重复选择`:''}。`;
+  const hookOnly=uniqueHooks.size+selectedGroupIds.length+$$('[data-link="rule"]:checked').length+(agent?.ruleIds?.length||0);
+  $('#deploy-preview').disabled=!project?.directory||(!modelId&&(agent||unique.size||$$('[data-deploy-prompt]:checked').length))||(!agent&&!unique.size&&!$$('[data-deploy-prompt]:checked').length&&!hookOnly&&!state.deployment?.hooksPreviouslyApplied&&!state.deployment?.rulesPreviouslyApplied);
 }
 function renderDeploy() {
   const projects=state.assets.project||[], agents=state.assets.agent||[];
@@ -626,33 +862,50 @@ function renderDeploy() {
   const chosenAgent=agents.find(agent=>agent.id===state.deployment?.agentId);
   const selectedSuites=state.deployment?.suiteIds??chosenProject?.suiteIds??[];
   const software=state.deployment?.software||'claude', modelId=state.deployment?.modelId||chosenAgent?.modelId||'';
-  $('#content').innerHTML=`<div class="intro"><div><h2>组合并应用 Agent 资产</h2><p>选择目标项目与软件，再组合 Agent、单个 Skills、Skills 套件和系统提示词。预览确认后生效。</p></div></div>
+  $('#content').innerHTML=`<div class="intro"><div><h2>组合并应用 Agent 资产</h2><p>选择目标项目与软件，再组合 Agent、单个 Skills、Skills 套件、Hooks 和系统提示词。预览确认后生效。</p></div></div>
     <div class="panel editor"><div class="form-grid">
       <div class="field"><label class="field-label" for="deploy-project">目标项目</label><select id="deploy-project">${options('project',state.deployment?.projectId)}</select><span class="hint" id="deploy-path-hint"></span></div>
       <div class="field"><label class="field-label" for="deploy-software">Harness 框架 <span class="pill">必选</span></label><select id="deploy-software"><option value="claude" ${software==='claude'?'selected':''}>Claude Code</option><option value="codex" ${software==='codex'?'selected':''}>Codex</option></select></div>
-      <div class="field"><label class="field-label" for="deploy-model">模型版本 <span class="pill">必选</span></label><select id="deploy-model">${options('model',modelId)}</select></div>
+      <div class="field"><label class="field-label" for="deploy-model">模型版本 <span class="pill gray">仅 Hooks / Rules 可不选</span></label><select id="deploy-model">${options('model',modelId)}</select></div>
       <div class="field"><label class="field-label" for="deploy-agent">Agent（可选）</label><select id="deploy-agent">${deployAgentOptions(state.deployment?.agentId,software,modelId)}</select></div>
     </div>
     <div class="section-title">Skills</div><div class="deploy-asset-group"><strong>单个 Skills</strong>${deployCheckboxList('skill',state.deployment?.skillIds||[],software,modelId)}</div>
     <div class="deploy-asset-group"><strong>Skills 套件</strong>${deployCheckboxList('workflow',selectedSuites,software,modelId)}</div>
     <p class="small-note" id="deploy-skill-summary"></p>
+    <div class="section-title">Hooks</div><div class="deploy-asset-group"><strong>单个 Hook</strong>${deployCheckboxList('hook',state.deployment?.hookIds||[],software,modelId)}</div><div class="deploy-asset-group"><strong>Hooks 组</strong>${deployCheckboxList('hookgroup',state.deployment?.hookGroupIds||[],software,modelId)}</div><p class="small-note" id="deploy-hook-summary"></p><p class="small-note">项目级自动脚本，适用于所有模型。预览会显示配置与完整脚本；取消勾选后再次生效可移除助手管理的 Hooks。</p>
+    ${software==='claude'?`<div class="section-title">Rules</div>${deployCheckboxList('rule',state.deployment?.ruleIds||chosenProject?.ruleIds||[],software,modelId)}<p class="small-note">不绑定模型。Agent 关联与直接选择会去重；取消选择并再次生效可移除助手管理的规则。</p>`:''}
     <div class="section-title">系统提示词</div>
     <div id="deploy-prompt-list" class="deploy-prompt-list"></div><p class="small-note">按通用 → 模型 → Harness 框架 → 项目的顺序组合；只应用勾选的提示词。组合文档会写入项目，并同步到目标软件的项目指令。</p>
     <div class="quick-links"><button class="btn" id="compose-preview">预览系统提示词</button><button class="btn btn-primary" id="deploy-preview">预览生效内容</button></div>
     <div class="small-note" style="margin-top:13px">目标目录需已存在。同一个 Skill 即使从套件和单独选择中重复出现，也只部署一次。</div><div id="deploy-result"></div></div>`;
   const invalidate=()=>{ $('#deploy-result').innerHTML=''; updateDeployAvailability(); };
-  $('#deploy-project').onchange=event=>{ const project=projects.find(item=>item.id===event.target.value); $$('[data-link="workflow"]').forEach(input=>input.checked=(project?.suiteIds||[]).includes(input.value)); renderDeployPromptChoices(); invalidate(); };
+  $('#deploy-project').onchange=event=>{ const project=projects.find(item=>item.id===event.target.value); $$('[data-link="workflow"]').forEach(input=>input.checked=(project?.suiteIds||[]).includes(input.value)); renderDeployPromptChoices(); invalidate(); loadDeployHooks(true); };
   $('#deploy-software').onchange=()=>{state.deployment=deployValues();state.deployment.agentId='';renderDeploy();};
   $('#deploy-agent').onchange=()=>{ renderDeployPromptChoices(); invalidate(); };
   $('#deploy-model').onchange=()=>{state.deployment=deployValues();state.deployment.agentId='';renderDeploy();};
-  $$('[data-link="workflow"], [data-link="skill"]').forEach(input=>input.onchange=invalidate);
+  $$('[data-link="workflow"], [data-link="skill"], [data-link="hook"], [data-link="hookgroup"], [data-link="rule"]').forEach(input=>input.onchange=invalidate);
   renderDeployPromptChoices(state.deployment?.promptIds);
   updateDeployAvailability();
+  loadDeployHooks();
   $('#deploy-preview').onclick=()=>previewDeploy();
   $('#compose-preview').onclick=async()=>{ const values=deployValues(); try { const result=await api('compose','POST',values); const file=`.agent-asset-manager/${values.software}-system-prompt.md`; const target=values.software==='claude'?'CLAUDE.md':'AGENTS.md'; $('#deploy-result').innerHTML=`<div class="section-title">系统提示词组合 · ${result.layers.length} 层</div><div class="chips">${result.layers.map(item=>`<span class="chip">${escapeHtml(item.scope)} · ${escapeHtml(item.title)}</span>`).join('')}</div><p class="small-note">组合文档：${file}；生效后同步写入 ${target}。</p><pre class="markdown-preview" style="margin-top:12px">${escapeHtml(result.text||'尚未选择系统提示词。')}</pre>`; } catch(error) { notice(error.message,true); } };
 }
-function deployValues() { return {projectId:$('#deploy-project').value,agentId:$('#deploy-agent').value,software:$('#deploy-software').value,modelId:$('#deploy-model').value,skillIds:$$('[data-link="skill"]:checked').map(input=>input.value),suiteIds:$$('[data-link="workflow"]:checked').map(input=>input.value),promptIds:$$('[data-deploy-prompt]:checked').map(input=>input.value)}; }
-async function previewDeploy() { const values=deployValues(); state.deployment=values; try{const result=await api('deploy','POST',{...values,preview:true});$('#deploy-result').innerHTML=`<div class="section-title">将写入 ${result.files.length} 个文件${result.removals?.length?`，移除 ${result.removals.length} 个旧文件`:''}</div><div class="preview-list">${result.files.map(x=>`<details class="preview-file"><summary>${escapeHtml(x.path)}</summary><pre>${escapeHtml(x.content)}</pre></details>`).join('')}${(result.removals||[]).map(x=>`<div class="preview-file" style="padding:10px 12px;color:#b55e65;font-size:11px">移除旧文件：${escapeHtml(x)}</div>`).join('')}</div><div class="quick-links"><button class="btn btn-primary" id="deploy-apply">确认生效</button></div>`;$('#deploy-apply').onclick=async()=>{if(!await askConfirm('确认应用资产',`确认将 ${result.files.length} 个文件写入「${result.project}」？`))return;try{const applied=await api('deploy','POST',{...values,preview:false});notice(`已生效：写入 ${applied.files.length} 个文件。`);$('#deploy-result').insertAdjacentHTML('beforeend','<div class="callout" style="margin-top:15px">配置已写入目标项目。请在 Claude Code 或 Codex 中重新加载项目。</div>');}catch(e){notice(e.message,true);}};}catch(e){notice(e.message,true);} }
+function deployValues() { return {projectId:$('#deploy-project').value,agentId:$('#deploy-agent').value,software:$('#deploy-software').value,modelId:$('#deploy-model').value,hookIds:$$('[data-link="hook"]:checked').map(input=>input.value),hookGroupIds:$$('[data-link="hookgroup"]:checked').map(input=>input.value),ruleIds:$$('[data-link="rule"]:checked').map(input=>input.value),rulesPreviouslyApplied:state.deployment?.rulesPreviouslyApplied||false,hooksPreviouslyApplied:state.deployment?.hooksPreviouslyApplied||false,hooksTarget:state.deployment?.hooksTarget,skillIds:$$('[data-link="skill"]:checked').map(input=>input.value),suiteIds:$$('[data-link="workflow"]:checked').map(input=>input.value),promptIds:$$('[data-deploy-prompt]:checked').map(input=>input.value)}; }
+async function loadDeployHooks(reset=false) {
+  const projectId=$('#deploy-project').value,software=$('#deploy-software').value;
+  state.deployment||={};
+  if(!projectId){state.deployment.hooksPreviouslyApplied=false;state.deployment.rulesPreviouslyApplied=false;updateDeployAvailability();return;}
+  try {
+    const status=await api(`deployment-hooks?projectId=${encodeURIComponent(projectId)}&software=${software}`);
+    if(state.section!=='deploy'||$('#deploy-project').value!==projectId||$('#deploy-software').value!==software)return;
+    const key=`${projectId}:${software}`;
+    const changed=reset||state.deployment.hooksTarget!==key;
+    state.deployment.hooksPreviouslyApplied=status.applied;state.deployment.rulesPreviouslyApplied=status.rulesApplied; state.deployment.hooksTarget=key;
+    if(changed){$$('[data-link="hook"]').forEach(input=>input.checked=status.hookIds.includes(input.value));state.deployment.hookIds=status.hookIds;const groupIds=status.hookGroupIds||[];$$('[data-link="hookgroup"]').forEach(input=>input.checked=groupIds.includes(input.value));state.deployment.hookGroupIds=groupIds;const defaults=(state.assets.project||[]).find(p=>p.id===projectId)?.ruleIds||[];const ruleIds=status.rulesApplied?status.ruleIds:defaults;$$('[data-link="rule"]').forEach(input=>input.checked=ruleIds.includes(input.value));state.deployment.ruleIds=ruleIds;}
+    updateDeployAvailability();
+  }catch(error){if(state.section!=='deploy')return;state.deployment.hooksPreviouslyApplied=false;updateDeployAvailability();}
+}
+async function previewDeploy() { const values=deployValues(); state.deployment=values; try{const result=await api('deploy','POST',{...values,preview:true});$('#deploy-result').innerHTML=`<div class="section-title">将写入 ${result.files.length} 个文件${result.removals?.length?`，移除 ${result.removals.length} 个旧文件`:''}</div><div class="preview-list">${result.files.map(x=>`<details class="preview-file"><summary>${escapeHtml(x.path)}${x.writeMode==='replace'?' <span class="pill">覆盖全部内容</span>':''}</summary><pre>${escapeHtml(x.content)}</pre></details>`).join('')}${(result.removals||[]).map(x=>`<div class="preview-file" style="padding:10px 12px;color:#b55e65;font-size:11px">移除旧文件：${escapeHtml(x)}</div>`).join('')}</div><div class="quick-links"><button class="btn btn-primary" id="deploy-apply">确认生效</button></div>`;$('#deploy-apply').onclick=async()=>{if(!await askConfirm('确认应用资产',`确认将 ${result.files.length} 个文件写入「${result.project}」？${result.files.some(file=>file.writeMode==='replace')?' 项目指令文件将覆盖全部旧内容。':''}`))return;try{const applied=await api('deploy','POST',{...values,preview:false});state.deployment.hooksPreviouslyApplied=values.hookIds.length>0||values.hookGroupIds.length>0||(uiProfile((state.assets.agent||[]).find(a=>a.id===values.agentId),values.software,values.modelId)?.hookGroupIds||[]).length>0||(state.assets.agent.find(a=>a.id===values.agentId)?.profiles?.[`${values.software}:${values.modelId}`]?.hookIds||[]).length>0; state.deployment.rulesPreviouslyApplied=values.ruleIds.length>0||(uiProfile((state.assets.agent||[]).find(a=>a.id===values.agentId),values.software,values.modelId)?.ruleIds||[]).length>0; notice(`已生效：写入 ${applied.files.length} 个文件。`);$('#deploy-result').insertAdjacentHTML('beforeend',`<div class="callout" style="margin-top:15px">配置已写入目标项目，可在「项目」查看当前配置资产。${state.deployment.hooksPreviouslyApplied?'请在目标软件中检查 /hooks；Codex 的新增或修改 Hooks 还需审查并信任。':''}</div>`);}catch(e){notice(e.message,true);}};}catch(e){notice(e.message,true);} }
 function renderSync() {
   const sync=state.sync||{}, conflicts=sync.conflicts||[];
   const summary=sync.connected?(sync.conflict?'有待处理的同步冲突':sync.ahead&&sync.behind?`本机待上传 ${sync.ahead} 次，远程待下载 ${sync.behind} 次`:sync.ahead?`本机待上传 ${sync.ahead} 次`:sync.behind?`远程待下载 ${sync.behind} 次`:'已连接；可点击同步检查远程更新'):'尚未连接 GitHub 仓库';

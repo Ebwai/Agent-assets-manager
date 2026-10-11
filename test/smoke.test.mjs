@@ -79,9 +79,31 @@ test('资产保存、Git 历史、回滚与双软件生效', async t => {
   assert.ok(promptOnly.files.some(file => file.path.endsWith('codex-system-prompt.md')));
   await assert.rejects(request('compose', 'POST', { projectId: suiteProject.id, software: 'claude', promptIds: [harnessPrompt.id] }), /不匹配/);
   for (const software of ['claude', 'codex']) {
+    const instructionPath = path.join(projectDir, software === 'claude' ? 'CLAUDE.md' : 'AGENTS.md');
+    const previousContent = software === 'claude'
+      ? 'OLD_PROJECT_INSTRUCTIONS\n'
+      : 'OLD_BEFORE\n<!-- Agent Asset Manager: start -->\nOLD_MANAGED\n<!-- Agent Asset Manager: end -->\nOLD_AFTER\n';
+    fs.writeFileSync(instructionPath, previousContent);
     const plan = await request('deploy', 'POST', { projectId: project.id, agentId: agent.id, software, preview: true });
     assert.ok(plan.files.length >= 4);
+    const plannedInstructions = plan.files.find(file => file.path === instructionPath);
+    assert.equal(plannedInstructions.writeMode, 'replace');
+    assert.doesNotMatch(plannedInstructions.content, /OLD_PROJECT_INSTRUCTIONS|OLD_BEFORE|OLD_MANAGED|OLD_AFTER/);
+    assert.equal(fs.readFileSync(instructionPath, 'utf8'), previousContent, 'preview never overwrites existing content');
     await request('deploy', 'POST', { projectId: project.id, agentId: agent.id, software });
+    assert.equal(fs.readFileSync(instructionPath, 'utf8'), plannedInstructions.content);
+    await request('deploy', 'POST', { projectId: project.id, agentId: agent.id, software });
+    assert.equal(fs.readFileSync(instructionPath, 'utf8'), plannedInstructions.content, 'reapplying replaces without appending');
+    assert.equal((plannedInstructions.content.match(/<!-- Agent Asset Manager: start -->/g)||[]).length, 1);
+  }
+  agent.instructions = 'NEW_AGENT_INSTRUCTIONS';
+  await request('agent', 'POST', {message:'更新生效指令',asset:agent});
+  for(const software of ['claude','codex']) {
+    const instructionPath=path.join(projectDir,software==='claude'?'CLAUDE.md':'AGENTS.md');
+    fs.appendFileSync(instructionPath,'\nMANUALLY_APPENDED_OLD_CONTENT\n');
+    await request('deploy','POST',{projectId:project.id,agentId:agent.id,software});
+    assert.match(fs.readFileSync(instructionPath,'utf8'),/NEW_AGENT_INSTRUCTIONS/);
+    assert.doesNotMatch(fs.readFileSync(instructionPath,'utf8'),/MANUALLY_APPENDED_OLD_CONTENT/);
   }
   assert.ok(fs.existsSync(path.join(projectDir, '.claude/skills/file-check/SKILL.md')));
   assert.ok(fs.existsSync(path.join(projectDir, '.agents/skills/file-check/SKILL.md')));
