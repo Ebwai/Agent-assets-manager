@@ -1,5 +1,7 @@
 import http from 'node:http';
 import { validateModel, requestModel } from './model-protocols.mjs';
+import { normalizeModelService } from './public/model-protocols.js';
+import { discoverModels } from './model-discovery.mjs';
 import { createModelApplication } from './model-application.mjs';
 import { assetFiles, compareFiles } from './version-diff.mjs';
 import { createPluginStore } from './plugins.mjs';
@@ -293,6 +295,7 @@ function save(type, input, message, completedIssues = []) {
   const old = rawGet(type, id);
   const includedIssues = selectedCompletedIssues(type, id, completedIssues);
   const asset = { ...input, id, type, createdAt: old?.createdAt || now(), updatedAt: now() };
+  if (type === 'model') Object.assign(asset, normalizeModelService(asset));
   delete asset.apiKey;
   delete asset.issues;
   if (profiledTypes.has(type) && (asset.assetHarness || asset.assetModelId || old?.profiles)) {
@@ -998,6 +1001,12 @@ async function handleApi(req, url) {
     return {ok:true,asset};
   }
   if (segments[0] === 'bootstrap' && method === 'GET') return { hookEvents, assets: Object.fromEntries([...types].map(t => [t, list(t).map(a => t === 'model' ? { ...a, hasKey: !!readJson(keysFile, {})[a.id] } : a)])), settings: settings(), sync: { ...syncStatus(), conflicts: conflictItems() } };
+  if (segments[0] === 'model-discovery' && method === 'POST') {
+    const draft = body.asset;
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('供应商配置无效');
+    const key = typeof draft.apiKey === 'string' && draft.apiKey.trim() ? draft.apiKey.trim() : draft.id ? readJson(keysFile, {})[safeId(draft.id)] : '';
+    return discoverModels(draft, key);
+  }
   if (segments[0] === 'model-test' && method === 'POST') {
     const draft = body.asset;
     if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('模型配置无效');
@@ -1009,9 +1018,9 @@ async function handleApi(req, url) {
     const restore = body.restore === true;
     const model = restore ? null : get('model', safeId(body.modelId));
     if (!restore && !model) throw new Error('模型配置不存在');
-    const projectDirectory = body.software === 'claude' ? assertProject(body.projectId).directory : undefined;
+    const legacyProjectDirectories = Object.values(readJson(pathsFile, {}));
     const key = model ? readJson(keysFile, {})[model.id] : '';
-    const input = { model, key, software: body.software, projectDirectory, restore };
+    const input = { model, key, software: body.software, selectedModel: body.selectedModel, legacyProjectDirectories, restore };
     return body.preview === true ? modelApplication.preview(input) : modelApplication.apply(input, body.token);
   }
   if (segments[0] === 'rule-validate' && method === 'POST') return {ok:true,markdown:renderRule(body.asset)};

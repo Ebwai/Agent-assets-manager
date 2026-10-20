@@ -22,7 +22,7 @@
 
 1. 在「项目」里登记项目，点击「选择文件夹」打开系统目录选择窗口。本机目录可稍后分配，且不会上传远程。新电脑载入项目后会显示待分配路径。
 2. 创建 Skill、套件、提示词层和 Agent 时，先选择 Harness 框架与模型服务中的模型版本。一个资产可保存多个组合的微调内容，每次保存都填写版本说明。新建 Skill 时可点「从本地目录导入」，选择包含 `SKILL.md` 的单个 Skill 文件夹，确认解析预览后编辑或直接保存为 Git 版本。`scripts/`、`references/`、`assets/` 中的文件会一并带入。
-3. 在「模型服务」选择 API 协议，填写地址、模型 ID 和 API Key。支持 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses、Gemini generateContent；本地服务可选择无需密钥。「测试连接」可验证未保存草稿，审查、改进及画板 AI 功能复用此服务。
+3. 在「模型服务」配置供应商名称、API 协议、地址和 API Key，获取或手工维护多个模型 ID，再选择资产 AI 辅助使用的模型。支持 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses、Gemini generateContent；本地服务可选择无需密钥。「测试 AI 辅助模型连接」可验证未保存草稿，审查、改进及画板 AI 功能使用指定模型。
 4. 在「生效」选择 Harness 框架与模型版本，再选择该组合可用的资产、预览目标文件，确认后写入项目目录。Claude Code 使用 `.claude/skills` 和 `CLAUDE.md`；Codex 使用 `.agents/skills` 和 `AGENTS.md`。
 5. 在「远程同步」连接一个 GitHub 仓库，再点「一键同步」。新电脑连接同一仓库会载入资产和完整历史。两台电脑修改同一资产时，页面会要求逐项选择本机或远程内容。
 
@@ -30,15 +30,15 @@
 
 ### Claude Code / Codex 自定义 API
 
-保存模型服务后，在该模型编辑页点击「应用 / 撤销自定义 API」，选择目标软件，再预览、确认。普通资产生效中选择模型仅匹配资产内容，不会隐式切换软件 API。
+保存供应商模型服务后，在编辑页点击「应用 / 撤销用户级 API」，选择目标软件及其使用的模型，再预览、确认。两种软件均配置本机用户级，无需选择项目。目标软件模型从已保存列表选择，可以与资产 AI 辅助模型不同，互不修改；普通资产生效中选择模型服务仅匹配资产内容，不会隐式切换软件 API。
 
-- Claude Code：选择目标项目，将地址、模型和凭据辅助命令写入 `.claude/settings.local.json`，保留其他配置。主服务需为 Messages 协议，或在兼容选项中填写 Messages 网关地址。
+- Claude Code：将地址、模型和凭据辅助命令写入本机 `$CLAUDE_CONFIG_DIR/settings.json`（默认 `~/.claude/settings.json`），保留其他配置。主服务需为 Messages 协议，或在兼容选项中填写 Messages 网关地址。已登记项目中的旧版助手 API 覆盖会列入预览并在确认后恢复，受管字段被外部修改时停止迁移。
 - Codex：写入本机 `$CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`）的自定义 provider，使用 Responses 协议；这是用户级配置，影响使用它的新会话，预览会明确显示。主服务为其他协议时需填写 Responses 网关地址；项目级 provider 不会生效。
-- 目标网关可分别覆盖模型 ID，使用本服务的同一 Key；若 Key 不同，请另建服务。应用不内置完整协议转换网关，使用 New API 等服务提供的兼容端点即可接入其他上游。
+- 供应商模型列表支持「从 API 获取模型列表」及手工增删，每行一个 ID；获取结果会合并到草稿，不自动保存。目标网关使用本服务的同一 Key；若 Key 不同，请另建服务。应用不内置完整协议转换网关，使用 New API 等服务提供的兼容端点即可接入其他上游。
 - Key 不写入目标配置，认证辅助程序从助手私有目录读取；换电脑需重新保存 Key 并应用。环境变量、启动参数及组织策略可能覆盖配置，应用后请重新启动软件并检查连接。
 - 「撤销助手配置，恢复原值」也需先预览确认；受管字段被外部修改时停止覆盖。原配置及恢复信息仅保存在助手私有目录。TOML 应用会重新排版；没有外部修改时撤销还原原始文本，有无关修改时保留其语义。
 
-连接测试仅验证文本调用。目标网关及模型还需兼容目标软件的流式输出、工具调用和上下文处理，不能把一次返回文本视为完整 Agent 兼容认证。旧模型未设置协议时仍按 Anthropic 处理。
+连接测试仅验证文本调用。目标网关及模型还需兼容目标软件的流式输出、工具调用和上下文处理，不能把一次返回文本视为完整 Agent 兼容认证。旧模型未设置协议时仍按 Anthropic 处理；旧单模型服务兼容为单元素列表，保留原服务和资产引用。
 
 生效时，`CLAUDE.md`（Claude Code）或 `AGENTS.md`（Codex）使用本次选定的提示词、Agent 指令和套件说明覆盖整个文件；旧原文、旧管理区块及区块外文字会被替换，预览标明「覆盖全部内容」。重复生效不会追加。仅应用 Rules 时仍按 Rules 的写入范围处理。Skill 目录按当前资产版本更新；若目标位置已有非本助手管理的同名 Skill，会阻止覆盖。Claude Code 的允许工具写入 `.claude/settings.json` 的 `permissions.allow`，MCP 写入项目根目录 `.mcp.json`；Codex 的工具清单作为 Agent 指令，MCP 写入 `.codex/config.toml`。请在目标软件重新加载项目配置。
 

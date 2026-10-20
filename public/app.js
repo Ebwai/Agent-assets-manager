@@ -83,7 +83,7 @@ function emptyDraft(type) {
   if(type==='prompt') return {...base,scope:'global',target:'',content:''};
   if(type==='agent') return {...base,harness:'claude',instructions:'',hookIds:[],hookGroupIds:[],ruleIds:[],skillIds:[],workflowIds:[],promptIds:[],tools:[],mcps:[],modelId:''};
   if(type==='project') return {...base,directory:'',suiteIds:[],ruleIds:[]};
-  if(type==='model') return {...base,protocol:'anthropic',authMode:'key',baseUrl:'https://api.anthropic.com',model:'',apiKey:''};
+  if(type==='model') return {...base,protocol:'anthropic',authMode:'key',baseUrl:'https://api.anthropic.com',models:[],aiModel:'',model:'',apiKey:''};
   if(type==='settings') return {...base,title:'审查与改进提示词',reviewSystem:'',improveSystem:''};
 }
 function selectAsset(id) { state.selected=id; state.draft=deep((state.assets[state.section]||[]).find(x=>x.id===id)); state.profileDrafts={}; state.lastProfileCopy=null; state.variant='common'; state.openFields={}; state.openYamlGroups={}; render(); }
@@ -358,7 +358,7 @@ function bindForm(type) {
   if(type==='prompt') bindPrompt();
   if(type==='agent') bindAgent();
   if(type==='project') bindProject();
-  if(type==='model') bindModelFields({draft:d,api,notice,render,showModal,projects:state.assets.project||[],escapeHtml});
+  if(type==='model') bindModelFields({draft:d,api,notice,render,showModal,escapeHtml});
   if(['skill','prompt','rule'].includes(type)) {
     $('#editor-panel').oninput=updateTextWordCounts;
     $('#editor-panel').onchange=updateTextWordCounts;

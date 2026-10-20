@@ -4,7 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { apiUrl, modelApiRoot, validateModel } from './model-protocols.mjs';
-import { modelProtocol } from './public/model-protocols.js';
+import { modelProtocol, aiModelId, serviceModelIds } from './public/model-protocols.js';
 
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -56,7 +56,7 @@ function shellQuote(value) {
   return `"${value}"`;
 }
 
-export function targetModel(model, software) {
+export function targetModel(model, software, selectedModel) {
   validateModel(model);
   if (!['claude', 'codex'].includes(software)) throw new Error('请选择 Claude Code 或 Codex');
   const protocol = software === 'claude' ? 'anthropic' : 'openai-responses';
@@ -64,18 +64,19 @@ export function targetModel(model, software) {
   if (modelProtocol(model) !== protocol && !override) throw new Error(`${software === 'claude' ? 'Claude Code 需要 Anthropic Messages' : 'Codex 需要 OpenAI Responses'} 兼容端点；请在模型配置中填写对应网关地址，或选择兼容协议的模型服务`);
   const baseUrl = override || model.baseUrl;
   apiUrl(baseUrl);
-  return { ...model, protocol, baseUrl, model: model[software === 'claude' ? 'claudeModel' : 'codexModel']?.trim() || model.model };
+  const chosen = selectedModel === undefined ? model[software === 'claude' ? 'claudeModel' : 'codexModel']?.trim() || aiModelId(model) : selectedModel;
+  if (!serviceModelIds(model).includes(chosen)) throw new Error('请从此供应商已保存的模型列表中选择目标模型');
+  return { ...model, protocol, baseUrl, model: chosen };
 }
 
-export function createModelApplication({ privateDir, keysFile, codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex') }) {
+export function createModelApplication({ privateDir, keysFile, codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude') }) {
   const recordFile = path.join(privateDir, 'model-applications.json');
   const helperFile = path.join(privateDir, 'model-auth.mjs');
   const helperContent = `import fs from 'node:fs';\ntry {\n  const key = JSON.parse(fs.readFileSync(${JSON.stringify(keysFile)}, 'utf8'))[process.argv[2]];\n  if (typeof key !== 'string' || !key || /[\\r\\n]/.test(key)) throw Error();\n  process.stdout.write(key);\n} catch { process.stderr.write('模型密钥不存在，请在资产管理助手中重新配置。\\n'); process.exitCode = 1; }\n`;
 
-  function plan({ model, key, software, projectDirectory, restore = false }) {
+  function plan({ model, key, software, selectedModel, legacyProjectDirectories = [], restore = false }) {
     if (!['claude', 'codex'].includes(software)) throw new Error('目标软件无效');
-    if (software === 'claude' && (!projectDirectory || !path.isAbsolute(projectDirectory) || !fs.statSync(projectDirectory).isDirectory())) throw new Error('请先选择已分配本机目录的项目');
-    const file = software === 'claude' ? path.join(projectDirectory, '.claude', 'settings.local.json') : path.join(codexHome, 'config.toml');
+    const file = software === 'claude' ? path.join(claudeHome, 'settings.json') : path.join(codexHome, 'config.toml');
     assertOrdinaryPath(file);
     assertOrdinaryPath(recordFile);
     assertOrdinaryPath(helperFile);
@@ -91,6 +92,27 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
       if (!same(field(document, owned.path), owned.written)) throw new Error('助手管理的 API 配置已被外部修改，请先恢复为上次应用值或手动处理；已停止覆盖');
     }
     const serialize = value => software === 'claude' ? JSON.stringify(value, null, 2) + '\n' : stringifyToml(value);
+    const legacyFiles = [];
+    if (software === 'claude' && !restore) {
+      for (const directory of [...new Set(legacyProjectDirectories)]) {
+        if (typeof directory !== 'string' || !path.isAbsolute(directory)) continue;
+        const legacyFile = path.join(directory, '.claude', 'settings.local.json');
+        const legacyId = hash(path.resolve(legacyFile));
+        const legacy = records[legacyId];
+        if (!legacy || legacy.software !== 'claude') continue;
+        assertOrdinaryPath(legacyFile);
+        const legacyBefore = read(legacyFile);
+        let legacyDocument;
+        try { legacyDocument = legacyBefore === null ? {} : JSON.parse(legacyBefore); } catch { throw new Error('旧项目 API 配置无法解析，已停止迁移'); }
+        for (const owned of legacy.fields) {
+          if (!same(field(legacyDocument, owned.path), owned.written)) throw new Error('旧项目 API 配置已被外部修改，请处理后再应用用户级配置');
+        }
+        for (const owned of legacy.fields) setField(legacyDocument, owned.path, owned.before);
+        const legacyContent = legacyBefore !== null && hash(legacyBefore) === legacy.writtenHash ? legacy.restoreContent : JSON.stringify(legacyDocument, null, 2) + '\n';
+        legacyFiles.push({ file: legacyFile, before: legacyBefore, content: legacyContent });
+        delete records[legacyId];
+      }
+    }
     let content, nextRecord;
     if (restore) {
       if (!previous) throw new Error('此位置没有可撤销的助手 API 配置');
@@ -99,7 +121,7 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
       delete records[recordId];
     } else {
       if (!model?.id) throw new Error('请先保存模型服务');
-      const target = targetModel(model, software);
+      const target = targetModel(model, software, selectedModel);
       if (model.authMode !== 'none' && !key) throw new Error('请先保存 API Key');
       const rootUrl = modelApiRoot(target, target.protocol);
       const updates = software === 'claude' ? [
@@ -120,11 +142,11 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
       const fields = updates.map(update => ({ path: update.path, before: field(document, update.path), written: update.entry }));
       for (const update of updates) setField(document, update.path, update.entry);
       content = serialize(document);
-      nextRecord = { modelId: model.id, software, fields, restoreContent: baseline, writtenHash: hash(content) };
+      nextRecord = { modelId: model.id, selectedModel: target.model, path: file, software, fields, restoreContent: baseline, writtenHash: hash(content) };
       records[recordId] = nextRecord;
     }
-    const token = hash(JSON.stringify({ file, before, content, recordsText, model, keyHash: hash(key || ''), restore, helper: read(helperFile) }));
-    return { file, before, content, token, records, restore, helperContent, recordsText, software, scope: software === 'claude' ? '此项目的 Claude Code 本机配置' : '本机当前用户的 Codex 配置（影响新会话）' };
+    const token = hash(JSON.stringify({ file, before, content, recordsText, model, selectedModel, legacyFiles, keyHash: hash(key || ''), restore, helper: read(helperFile) }));
+    return { file, before, content, token, records, restore, helperContent, recordsText, software, legacyFiles, scope: `本机当前用户的 ${software === 'claude' ? 'Claude Code' : 'Codex'} 配置（影响使用此配置的新会话）` };
   }
 
   function preview(input) {
@@ -139,7 +161,7 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
         else gather(item);
       }
     };
-    for (const text of [result.before, result.content]) if (text) gather(parse(text));
+    for (const text of [result.before, result.content, ...result.legacyFiles.flatMap(item => [item.before, item.content])]) if (text) gather(parse(text));
     const redactValue = value => {
       if (typeof value === 'string') {
         for (const secret of secrets) value = value.replaceAll(secret, '[密钥已隐藏]');
@@ -150,7 +172,7 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
       return value;
     };
     const redact = (text, empty) => text === null ? empty : result.software === 'claude' ? JSON.stringify(redactValue(parse(text)), null, 2) + '\n' : stringifyToml(redactValue(parse(text)));
-    return { path: result.file, scope: result.scope, before: redact(result.before, '（文件不存在）'), after: redact(result.content, '（撤销后删除此文件）'), token: result.token, restore: result.restore };
+    return { path: result.file, scope: result.scope, before: redact(result.before, '（文件不存在）'), after: redact(result.content, '（撤销后删除此文件）'), token: result.token, restore: result.restore, legacyRestorations: result.legacyFiles.map(item => ({ path: item.file, before: redact(item.before, '（文件不存在）'), after: redact(item.content, '（撤销后删除此文件）') })) };
   }
 
   function atomicWrite(file, content) {
@@ -167,9 +189,11 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
     const oldHelper = read(helperFile);
     try {
       if (!result.restore) atomicWrite(helperFile, helperContent);
+      for (const legacy of result.legacyFiles) atomicWrite(legacy.file, legacy.content);
       atomicWrite(result.file, result.content);
       atomicWrite(recordFile, JSON.stringify(result.records, null, 2) + '\n');
     } catch (error) {
+      for (const legacy of result.legacyFiles) atomicWrite(legacy.file, legacy.before);
       atomicWrite(result.file, result.before);
       atomicWrite(recordFile, result.recordsText);
       atomicWrite(helperFile, oldHelper);

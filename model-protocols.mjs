@@ -1,4 +1,4 @@
-import { modelProtocols, modelProtocol } from './public/model-protocols.js';
+import { modelProtocols, modelProtocol, normalizeModelService } from './public/model-protocols.js';
 
 export function apiUrl(value) {
   let url;
@@ -9,6 +9,7 @@ export function apiUrl(value) {
 }
 
 export function validateModel(model) {
+  normalizeModelService(model);
   if (!modelProtocols.some(item => item.id === modelProtocol(model))) throw new Error('不支持的 API 协议，请选择协议或使用兼容网关');
   apiUrl(model.baseUrl);
   if (typeof model.model !== 'string' || !model.model.trim()) throw new Error('请填写模型 ID');
@@ -49,6 +50,7 @@ export function modelApiRoot(model, protocol) {
 }
 
 export function modelRequest(model, key, system, user, maxTokens) {
+  model = normalizeModelService(model);
   validateModel(model);
   if (model.authMode !== 'none' && !key) throw new Error('请先保存 API Key，或为无需认证的本地服务选择「无需密钥」');
   const protocol = modelProtocol(model);

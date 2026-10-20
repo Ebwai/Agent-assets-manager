@@ -5,18 +5,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parse as parseToml } from 'smol-toml';
+import crypto from 'node:crypto';
 import { createModelApplication, targetModel } from '../model-application.mjs';
 
 function setup(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'model-application-'));
   t.after(() => { assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)); fs.rmSync(root, { recursive: true, force: true }); });
-  const privateDir = path.join(root, 'private'), codexHome = path.join(root, 'codex'), projectDirectory = path.join(root, 'project');
+  const privateDir = path.join(root, 'private'), codexHome = path.join(root, 'codex'), claudeHome = path.join(root, 'claude'), projectDirectory = path.join(root, 'project');
   fs.mkdirSync(privateDir); fs.mkdirSync(projectDirectory); fs.mkdirSync(codexHome);
   const keysFile = path.join(privateDir, 'keys.json');
   fs.writeFileSync(keysFile, JSON.stringify({ 'model-a': 'private-key' }));
-  const app = createModelApplication({ privateDir, keysFile, codexHome });
+  const app = createModelApplication({ privateDir, keysFile, codexHome, claudeHome });
   const model = { id: 'model-a', title: '测试服务', model: 'test-model', baseUrl: 'https://example.com', protocol: 'anthropic' };
-  return { root, privateDir, codexHome, projectDirectory, keysFile, app, model };
+  return { root, privateDir, codexHome, claudeHome, projectDirectory, keysFile, app, model };
 }
 
 test('协议兼容门禁与网关覆盖，不能把 Chat Completions 当成 Responses', () => {
@@ -27,9 +28,9 @@ test('协议兼容门禁与网关覆盖，不能把 Chat Completions 当成 Resp
   assert.equal(target.protocol, 'openai-responses'); assert.equal(target.model, 'mapped-model');
 });
 
-test('Claude 项目配置：预览不写入、隐藏原有密钥、辅助程序运行时读取新密钥、完整撤销', t => {
-  const { app, model, privateDir, projectDirectory, keysFile } = setup(t);
-  const file = path.join(projectDirectory, '.claude', 'settings.local.json');
+test('Claude 用户级配置：预览不写入、隐藏原有密钥、辅助程序运行时读取新密钥、完整撤销', t => {
+  const { app, model, privateDir, projectDirectory, claudeHome, keysFile } = setup(t);
+  const file = path.join(claudeHome, 'settings.json');
   const original = '{\n  "env": {"ANTHROPIC_API_KEY":"old-secret", "OTHER":"keep"},\n  "permissions":{"allow":["Read"]}\n}\n';
   fs.mkdirSync(path.dirname(file)); fs.writeFileSync(file, original);
   const input = { model, key: 'private-key', software: 'claude', projectDirectory };
@@ -86,7 +87,7 @@ test('Codex 用户级 provider：保留其他配置，密钥用命令提供，�
 });
 
 test('文件、模型、密钥变化使预览过期，外部修改受管字段时停止应用和撤销', t => {
-  const { app, model, projectDirectory } = setup(t);
+  const { app, model, projectDirectory, claudeHome } = setup(t);
   const input = { model, key: 'private-key', software: 'claude', projectDirectory };
   const preview = app.preview(input);
   assert.throws(() => app.apply({ ...input, key: 'new-key' }, preview.token), /重新预览/);
@@ -102,7 +103,7 @@ test('文件、模型、密钥变化使预览过期，外部修改受管字段�
 });
 
 test('撤销保留无关手动修改，初次创建的文件可完全恢复为不存在', t => {
-  const { app, model, projectDirectory } = setup(t);
+  const { app, model, projectDirectory, claudeHome } = setup(t);
   const input = { model, key: 'private-key', software: 'claude', projectDirectory };
   let preview = app.preview(input); app.apply(input, preview.token);
   const restore = { software: 'claude', projectDirectory, restore: true };
@@ -136,12 +137,58 @@ test('写入管理记录失败时回滚配置与辅助程序', t => {
 
 
 test('配置中的带转义字符密钥按结构脱敏，辅助命令可供预览', t => {
-  const { app, model, projectDirectory } = setup(t);
-  const file = path.join(projectDirectory, '.claude', 'settings.local.json');
+  const { app, model, projectDirectory, claudeHome } = setup(t);
+  const file = path.join(claudeHome, 'settings.json');
   fs.mkdirSync(path.dirname(file));
   const secret = 'old-"quoted"-\\\\key';
   fs.writeFileSync(file, JSON.stringify({env:{ANTHROPIC_API_KEY:secret}}));
   const preview = app.preview({model,key:'private-key',software:'claude',projectDirectory});
   assert.equal(JSON.parse(preview.before).env.ANTHROPIC_API_KEY, '[密钥已隐藏]');
   assert.match(JSON.parse(preview.after).apiKeyHelper, /model-auth\.mjs/);
+});
+
+
+test('外部模型选择与 AI 辅助模型独立，模型不在列表或预览后选择变化时拒绝', t => {
+  const { app, model, claudeHome, projectDirectory } = setup(t);
+  const service = { ...model, models: ['ai-model', 'client-model'], aiModel: 'ai-model', model: 'ai-model' };
+  const input = { model: service, key: 'private-key', software: 'claude', selectedModel: 'client-model' };
+  const preview = app.preview(input);
+  assert.equal(preview.path, path.join(claudeHome, 'settings.json')); assert.match(preview.scope, /当前用户/);
+  assert.throws(() => app.apply({ ...input, selectedModel: 'ai-model' }, preview.token), /重新预览/);
+  app.apply(input, preview.token);
+  assert.equal(JSON.parse(fs.readFileSync(preview.path, 'utf8')).model, 'client-model');
+  assert.equal(service.aiModel, 'ai-model'); assert.equal(fs.existsSync(path.join(projectDirectory, '.claude')), false);
+  assert.throws(() => app.preview({ ...input, selectedModel: 'missing' }), /模型列表/);
+});
+
+function seedLegacy(context) {
+  const file = path.join(context.projectDirectory, '.claude', 'settings.local.json');
+  const original = JSON.stringify({ permissions: { allow: ['Read'] } }, null, 2) + '\n';
+  const written = JSON.stringify({ permissions: { allow: ['Read'] }, model: 'test-model' }, null, 2) + '\n';
+  fs.mkdirSync(path.dirname(file)); fs.writeFileSync(file, written);
+  const digest = value => crypto.createHash('sha256').update(value).digest('hex');
+  fs.writeFileSync(path.join(context.privateDir, 'model-applications.json'), JSON.stringify({ [digest(path.resolve(file))]: { software: 'claude', fields: [{ path: ['model'], before: { exists: false }, written: { exists: true, value: 'test-model' } }], restoreContent: original, writtenHash: digest(written) } }));
+  return { file, original, written };
+}
+
+test('旧项目覆盖随用户级应用预览恢复，预览零写入并保留原项目设置', t => {
+  const context = setup(t), legacy = seedLegacy(context);
+  const input = { model: context.model, key: 'private-key', software: 'claude', legacyProjectDirectories: [context.projectDirectory] };
+  const preview = context.app.preview(input);
+  assert.equal(preview.legacyRestorations.length, 1); assert.equal(preview.legacyRestorations[0].path, legacy.file);
+  assert.equal(fs.readFileSync(legacy.file, 'utf8'), legacy.written); assert.equal(fs.existsSync(preview.path), false);
+  context.app.apply(input, preview.token);
+  assert.equal(fs.readFileSync(legacy.file, 'utf8'), legacy.original);
+  assert.equal(JSON.parse(fs.readFileSync(preview.path, 'utf8')).model, 'test-model');
+});
+
+test('旧项目受管字段被修改则拒绝迁移，无关修改使旧预览失效', t => {
+  const context = setup(t), legacy = seedLegacy(context);
+  const input = { model: context.model, key: 'private-key', software: 'claude', legacyProjectDirectories: [context.projectDirectory] };
+  const preview = context.app.preview(input);
+  fs.writeFileSync(legacy.file, JSON.stringify({ model: 'test-model', other: true }));
+  assert.throws(() => context.app.apply(input, preview.token), /重新预览/);
+  fs.writeFileSync(legacy.file, JSON.stringify({ model: 'manual-change' }));
+  assert.throws(() => context.app.preview(input), /外部修改/);
+  assert.equal(fs.existsSync(preview.path), false);
 });
