@@ -1,3 +1,4 @@
+import { repositoryComparison } from './version-diff.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -96,9 +97,9 @@ export function createPluginStore(dataRoot, {validateRemote=githubRepository, re
     else if(action==='abort'){if(!rebase(p))throw Error('没有待处理的 rebase');await git(p,['rebase','--abort']);}
     else if(action==='remote'){await clean(p);const remote=validateRemote(body.url);if(p.ownership==='third-party'&&remote.slug===validateRemote(p.upstreamUrl).slug)throw Error('他人项目的修改必须推送到自己的 Fork');if(await optional(p,['remote','get-url','origin']))await git(p,['remote','set-url','origin',remote.url]);else await git(p,['remote','add','origin',remote.url]);p.forkUrl=remote.url;if(!p.upstreamUrl){await git(p,['remote','add','upstream',remote.url]);p.upstreamUrl=remote.url;p.ownership='owned';}update(p);}
     else if(action==='push'){await clean(p);if(!p.forkUrl)throw Error('请先关联自己的 GitHub 仓库或 Fork');if(body.newBranch){await git(p,['switch','-c',await validBranch(p,body.newBranch)]);}await writable(p);const current=await branch(p);await git(p,['push','--set-upstream','origin',current]);}
-    else if(action==='upstream-diff'){if(!p.upstreamUrl)throw Error('尚未关联上游');return {diff:await git(p,['diff',p.defaultBranch,'upstream/'+p.defaultBranch])};}
+    else if(action==='upstream-diff'){if(!p.upstreamUrl)throw Error('尚未关联上游');return {...await repositoryComparison(dir(p),null,{beforeRef:p.defaultBranch,afterRef:'upstream/'+p.defaultBranch}),diff:await git(p,['diff','--no-ext-diff','--no-textconv',p.defaultBranch,'upstream/'+p.defaultBranch])};}
     else if(action==='restore'){await writable(p);await clean(p);if(!/^[a-f0-9]{40}$/.test(body.hash||''))throw Error('版本无效');if(typeof body.message!=='string'||body.message.trim().length<3||body.message.length>200)throw Error('请填写 3–200 字的版本说明');await git(p,['cat-file','-e',body.hash+'^{commit}']);await git(p,['restore','--source='+body.hash,'--staged','--worktree','--','.']);await commit(p,body.message);}
-    else if(action==='diff')return {diff:await git(p,['diff',body.hash&&/^[a-f0-9]{40}$/.test(body.hash)?body.hash:'HEAD'])};
+    else if(action==='diff')return {...await repositoryComparison(dir(p),body.hash),diff:await git(p,['show','--format=','--root','--first-parent','--no-ext-diff','--no-textconv',body.hash,'--'])};
     else if(action==='metadata'){if(!String(body.title||'').trim())throw Error('请填写名称');p.title=String(body.title).trim();p.description=String(body.description||'');update(p);}
     else throw Error('未知 Plugin 操作');
     const result=await status(p);p.releases=result.releases;update(p);return {...result,updatedAt:p.updatedAt};

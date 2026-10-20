@@ -61,6 +61,18 @@ test('项目资产扫描只读取；逐项确认、跳过继续、来源变化�
   assert.equal((await request('rule'))[0].content,'检查输入','existing asset remains unchanged');
   await confirm(changedRule,'import',{title:'api-修改版'});
   assert.equal((await request('rule')).length,2,'renaming permits import');
+  put('.claude/rules/api.md','登记为新版本的规则');
+  const versionItem=(await scan()).candidates.find(c=>c.source==='.claude/rules/api.md');
+  const original=(await request('rule')).find(asset=>asset.title===changedRule.title);
+  const versionOptions={importMode:'version',assetId:original.id,expectedUpdatedAt:original.updatedAt};
+  await assert.rejects(confirm(versionItem,'import',{...versionOptions,assetId:savedSkill.id}),/同名资产/);
+  await assert.rejects(confirm(versionItem,'import',{...versionOptions,expectedUpdatedAt:'outdated'}),/发生变化/);
+  const registered=await confirm(versionItem,'import',versionOptions);
+  assert.equal(registered.asset.id,original.id);
+  assert.equal((await request('rule')).length,2,'new version keeps asset count unchanged');
+  assert.equal((await request(`rule/${original.id}`)).content,'登记为新版本的规则');
+  assert.equal((await request(`rule/${original.id}/history`)).length,2,'previous version is retained');
+  assert.ok(!(await scan()).candidates.some(c=>c.key===versionItem.key),'registered source is not imported again');
   const outside=path.join(temp,'outside');fs.mkdirSync(outside);fs.writeFileSync(path.join(outside,'secret.md'),'outside secret');
   fs.symlinkSync(outside,path.join(directory,'.claude/rules/linked'),process.platform==='win32'?'junction':'dir');
   result=await scan();assert.ok(result.warnings.some(w=>w.includes('linked')));assert.ok(!JSON.stringify(result).includes('outside secret'));

@@ -1,4 +1,7 @@
 import http from 'node:http';
+import { validateModel, requestModel } from './model-protocols.mjs';
+import { createModelApplication } from './model-application.mjs';
+import { assetFiles, compareFiles } from './version-diff.mjs';
 import { createPluginStore } from './plugins.mjs';
 import { hookEvents, validateHook, hookGroup, mergeHookGroups, testHook, assertHookDestination } from './hooks.mjs';
 import { validateRule, renderRule, parseRule } from './rules.mjs';
@@ -12,12 +15,15 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 
+import { normalizeGraph, compileGraph } from './public/skill-graph.js';
+import { defaultVisualizeSystem, defaultSyncGraphSystem, graphModelRequest, parseGraphModelResult } from './skill-visualization.mjs';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataRoot = process.env.ASSET_DATA_DIR || path.join(os.homedir(), 'Agent_assets_manager');
 const repo = path.join(dataRoot, 'repo');
 const privateDir = path.join(dataRoot, 'private');
 const plugins = createPluginStore(dataRoot);
 const keysFile = path.join(privateDir, 'keys.json');
+const modelApplication = createModelApplication({ privateDir, keysFile });
 const pathsFile = path.join(privateDir, 'project-paths.json');
 const importsFile = path.join(privateDir, 'project-imports.json');
 const envFile = path.join(privateDir, 'agent-env.json');
@@ -114,12 +120,69 @@ function selectedAsset(type, asset) {
 }
 function localize(type, asset) {
   if (!asset) return asset;
+  asset = { ...asset, issues: assetIssues(type, asset.id) };
   if (type === 'project') return { ...asset, directory: readJson(pathsFile, {})[asset.id] || '', pathAssigned: !!readJson(pathsFile, {})[asset.id] };
   if (type === 'agent') {
     const environments = readJson(envFile, {});
     return { ...asset, mcps: (asset.mcps || []).map(item => ({ ...item, env: environments[asset.id]?.[item.name] || {} })) };
   }
   return asset;
+}
+
+function issueFile(type, id) {
+  return path.join(privateDir, 'asset-issues', safeType(type), `${safeId(id)}.json`);
+}
+function assetIssues(type, id) {
+  return readJson(issueFile(type, id), []);
+}
+function issueIncluded(issue) {
+  return !!issue.completedAt && (issue.versions || []).some(version => version.completedAt === issue.completedAt);
+}
+function updateAssetIssue(type, id, issueId, method, input) {
+  const asset = get(type, id);
+  if (!asset) throw new Error('资产不存在');
+  const records = assetIssues(type, id);
+  if (method === 'POST' && !issueId) {
+    if (typeof input.text !== 'string' || !input.text.trim()) throw new Error('请先填写问题记录');
+    if (input.text.length > 10000) throw new Error('问题记录不能超过 10000 字');
+    records.push({ id: crypto.randomUUID(), text: input.text.trim(), completedAt: null, createdAt: now(), updatedAt: now(),
+      sourceVersion: asset.activeVersion || history(type, id)[0]?.hash || null, versions: [] });
+  } else {
+    const index = records.findIndex(record => record.id === safeId(issueId));
+    if (index < 0) throw new Error('问题记录不存在');
+    const record = records[index];
+    if (input.expectedUpdatedAt !== record.updatedAt) throw new Error('问题记录已变化，请刷新后再操作');
+    if (method === 'DELETE') records.splice(index, 1);
+    else if (method === 'PUT') {
+      if (!Object.hasOwn(input, 'text') && !Object.hasOwn(input, 'completed')) throw new Error('请填写要修改的内容');
+      if (Object.hasOwn(input, 'text')) {
+        if (typeof input.text !== 'string' || !input.text.trim()) throw new Error('问题记录不能为空');
+        if (input.text.length > 10000) throw new Error('问题记录不能超过 10000 字');
+        record.text = input.text.trim();
+      }
+      if (Object.hasOwn(input, 'completed')) {
+        if (typeof input.completed !== 'boolean') throw new Error('完成状态无效');
+        record.completedAt = input.completed ? record.completedAt || new Date(Math.max(Date.now(), Date.parse(record.updatedAt) + 1)).toISOString() : null;
+      }
+      record.updatedAt = new Date(Math.max(Date.now(), Date.parse(record.updatedAt) + 1)).toISOString();
+    } else throw new Error('无效问题记录请求');
+  }
+  writeJson(issueFile(type, id), records);
+  return records;
+}
+function selectedCompletedIssues(type, id, selections) {
+  if (!Array.isArray(selections)) throw new Error('问题记录选择无效');
+  const records = assetIssues(type, id);
+  const ids = new Set();
+  return selections.map(selection => {
+    if (!selection || typeof selection !== 'object' || ids.has(selection.id)) throw new Error('问题记录选择无效');
+    ids.add(selection.id);
+    const record = records.find(issue => issue.id === selection.id);
+    if (!record || !record.completedAt || issueIncluded(record) || record.updatedAt !== selection.updatedAt) {
+      throw new Error('所选问题记录已变化，请重新打开版本提交并选择');
+    }
+    return record;
+  });
 }
 function list(type) { return rawList(type).map(asset => localize(type, selectedAsset(type, asset))); }
 function get(type, id) { return localize(safeType(type), selectedAsset(type, rawGet(type, safeId(id)))); }
@@ -150,7 +213,7 @@ function migrateLocalSettings() {
 }
 function requireMessage(message) {
   if (typeof message !== 'string' || message.trim().length < 3) throw new Error('请填写至少 3 个字的版本说明');
-  if (message.length > 200) throw new Error('版本说明不能超过 200 字');
+  if (message.length > 10000) throw new Error('版本说明不能超过 10000 字');
   return message.trim();
 }
 function titleFor(type, asset) { return asset.title || asset.name || `${type} ${asset.id}`; }
@@ -202,11 +265,7 @@ function validateAsset(type, a) {
     if (a.suiteIds && (!Array.isArray(a.suiteIds) || a.suiteIds.some(id => !get('workflow', id)))) throw new Error('项目包含无效的 Skills 套件');
     if (a.ruleIds !== undefined && (!Array.isArray(a.ruleIds) || a.ruleIds.some(id => !get('rule', id)))) throw new Error('项目包含不存在的 Rule');
   }
-  if (type === 'model') {
-    const url = new URL(a.baseUrl || '');
-    if (!['https:', 'http:'].includes(url.protocol)) throw new Error('API 地址必须是 HTTP 或 HTTPS');
-    if (!a.model) throw new Error('请填写模型 ID');
-  }
+  if (type === 'model') validateModel(a);
   if (type === 'workflow') {
     if (a.members && !String(a.description || '').trim()) throw new Error('请填写套件用途');
     const members = a.members || (a.skillIds || []).map(skillId => ({ skillId, role: '' }));
@@ -227,13 +286,15 @@ function validateAsset(type, a) {
   if (type === 'prompt' && a.scope !== 'global' && !a.target) throw new Error('请选择提示词的适用对象');
   if (type === 'prompt' && !String(a.content || '').trim()) throw new Error('提示词正文不能为空');
 }
-function save(type, input, message) {
+function save(type, input, message, completedIssues = []) {
   assertNoMerge();
   safeType(type); requireMessage(message);
   const id = input.id ? safeId(input.id) : crypto.randomUUID();
   const old = rawGet(type, id);
+  const includedIssues = selectedCompletedIssues(type, id, completedIssues);
   const asset = { ...input, id, type, createdAt: old?.createdAt || now(), updatedAt: now() };
   delete asset.apiKey;
+  delete asset.issues;
   if (profiledTypes.has(type) && (asset.assetHarness || asset.assetModelId || old?.profiles)) {
     if (!['claude', 'codex'].includes(asset.assetHarness)) throw new Error('请选择资产的 Harness 框架');
     if (!asset.assetModelId || !rawGet('model', safeId(asset.assetModelId))) throw new Error('请选择模型服务中已配置的模型版本');
@@ -241,6 +302,16 @@ function save(type, input, message) {
     if (type === 'prompt' && asset.scope === 'software' && asset.target !== asset.assetHarness) throw new Error('Harness 层提示词的适用框架应与资产框架一致');
   }
   if (type === 'agent' && asset.assetHarness && asset.assetModelId) { asset.harness = asset.assetHarness; asset.modelId = asset.assetModelId; }
+  if (type === 'skill') {
+    const oldProfile = old?.profiles ? old.profiles[profileKey(asset.assetHarness, asset.assetModelId)] : old;
+    for (const [software, variant] of Object.entries(asset.variants || {})) {
+      if (oldProfile?.variants?.[software]?.graph && !variant.graph) throw new Error('已有画板不能随文字修改丢弃，请先 AI 同步到现有可视化图');
+      if (variant.graph) {
+        variant.graph = normalizeGraph(variant.graph);
+        if (variant.body !== compileGraph(variant.graph)) throw new Error(`${software} 模板文字已修改，请先点击「AI 同步到现有图」再保存版本`);
+      }
+    }
+  }
   validateAsset(type, asset);
   if (type === 'project') {
     const paths = readJson(pathsFile, {});
@@ -269,6 +340,16 @@ function save(type, input, message) {
   writeJson(file, asset);
   git(['add', path.relative(repo, file).replaceAll('\\', '/')]);
   git(['commit', '-m', `${type}: ${titleFor(type, asset)} — ${message.trim()}`]);
+  if (includedIssues.length) {
+    const version = git(['rev-parse', 'HEAD']).trim();
+    const records = assetIssues(type, id);
+    for (const issue of includedIssues) {
+      const record = records.find(item => item.id === issue.id);
+      record.versions.push({ hash: version, message: message.trim(), text: issue.text, completedAt: issue.completedAt, includedAt: now() });
+      record.updatedAt = new Date(Math.max(Date.now(), Date.parse(record.updatedAt) + 1)).toISOString();
+    }
+    writeJson(issueFile(type, id), records);
+  }
   const active = readJson(activeFile, {});
   delete active[`${type}/${id}`];
   writeJson(activeFile, active);
@@ -293,7 +374,7 @@ function remove(type, id, message) {
 }
 function history(type, id) {
   const rel = path.relative(repo, assetPath(safeType(type), safeId(id))).replaceAll('\\', '/');
-  const raw = git(['log', '--format=%H%x1f%h%x1f%aI%x1f%s%x1e', '--', rel]);
+  const raw = git(['log', '--format=%H%x1f%h%x1f%aI%x1f%B%x1e', '--', rel]);
   return raw.split('\x1e').filter(Boolean).map(row => { const [hash, short, date, message] = row.trim().split('\x1f'); return { hash, short, date, message }; });
 }
 function recentVersions() {
@@ -314,9 +395,21 @@ function trash(type) {
   }).filter(Boolean);
 }
 function diff(type, id, hash) {
-  if (!/^[0-9a-f]{40}$/.test(hash)) throw new Error('无效版本');
+  if (!/^[0-9a-f]{40}$/.test(hash || '')) throw new Error('无效版本');
   const rel = path.relative(repo, assetPath(safeType(type), safeId(id))).replaceAll('\\', '/');
-  return git(['show', '--format=', '--find-renames', hash, '--', rel]);
+  const versions = git(['log', hash, '-2', '--format=%H', '--', rel]).trim().split('\n');
+  if (versions[0] !== hash) throw new Error('所选版本不属于这个资产');
+  const previous = versions[1] || null;
+  const read = revision => {
+    if (!revision) return null;
+    try { return JSON.parse(git(['show', revision + ':' + rel])); }
+    catch { throw new Error('无法读取资产版本'); }
+  };
+  return {
+    before: previous, after: hash,
+    files: compareFiles(assetFiles(read(previous), type), assetFiles(read(hash), type)),
+    diff: git(['show', '--format=', '--no-ext-diff', '--no-textconv', '--find-renames', hash, '--', rel])
+  };
 }
 function restore(type, id, hash, message) {
   assertNoMerge();
@@ -773,18 +866,11 @@ function makeDeployment(body) {
   files.push({ path: manifestPath, content: JSON.stringify({ files: currentPaths, fileHashes: Object.fromEntries(files.map(file=>[file.path,crypto.createHash('sha256').update(file.content).digest('hex')])), agentId:agent?.id || null, modelId, assetSnapshots, tools: software === 'claude' ? (agent?.tools || []) : [], mcps: mcps.map(x => x.name), suiteIds, skillIds: [...selected.keys()], hookIds, directHookIds, hookGroupIds, hooks: managedHooks, hookFiles, ruleIds, ruleFiles, promptIds: prompt.layers.map(layer => layer.id), updatedAt: now() }, null, 2) + '\n' });
   return { project: project.title, software, files, removals, promptLayers: prompt.layers };
 }
-async function callModel(modelId, system, user) {
+async function callModel(modelId, system, user, maxTokens = 3000) {
   const model = get('model', modelId);
   if (!model) throw new Error('模型配置不存在');
   const key = readJson(keysFile, {})[modelId];
-  if (!key) throw new Error('请先保存 API Key');
-  const url = new URL(model.baseUrl);
-  const basePath = url.pathname.replace(/\/$/, '');
-  const endpoint = basePath.endsWith('/v1/messages') ? url.href : new URL(`${basePath.endsWith('/v1') ? 'messages' : 'v1/messages'}`, url.href.endsWith('/') ? url.href : url.href + '/').href;
-  const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' }, body: JSON.stringify({ model: model.model, max_tokens: 3000, system, messages: [{ role: 'user', content: user }] }), signal: AbortSignal.timeout(90000) });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`模型服务返回 ${response.status}：${body.error?.message || JSON.stringify(body).slice(0, 250)}`);
-  return (body.content || []).filter(x => x.type === 'text').map(x => x.text).join('\n');
+  return requestModel(model, key, system, user, maxTokens);
 }
 const defaultReview = '你是 Agent Skills 审查员。依据 Agent Skills 规范审查发现性、触发准确性、执行步骤、资源按需加载、验证方法和边界情况。指出具体问题、风险级别与可执行修改建议。不要虚构不存在的文件。';
 const defaultImprove = '你是 Agent Skills 编辑员。根据用户遇到的问题修复 Skill。只返回 JSON 对象，格式为 {"summary":"修改说明","frontmatter":{...},"body":"完整 Markdown 正文"}。保留原有意图，并确保 name 和 description 符合 Agent Skills 规范。';
@@ -831,7 +917,7 @@ function projectConfiguration(projectId) {
   try {assertHookDestination(projectRoot,ruleRoot);walk(ruleRoot);}catch(error){result.externalRulesError=error.message;}
   return result;
 }
-function settings() { return list('settings')[0] || { id: null, title: '审查与改进提示词', reviewSystem: defaultReview, improveSystem: defaultImprove }; }
+function settings() { return { title: '审查与可视化提示词', reviewSystem: defaultReview, improveSystem: defaultImprove, visualizeSystem: defaultVisualizeSystem, syncGraphSystem: defaultSyncGraphSystem, ...(list('settings')[0] || { id: null }) }; }
 function discoveryKey(project,key) {
   return crypto.createHash('sha256').update(JSON.stringify([project.id,project.directory,key])).digest('hex');
 }
@@ -891,9 +977,19 @@ async function handleApi(req, url) {
     let asset;
     if(body.action==='import'){
       if(!item.importable)throw Error(item.error||'此项无法导入');
-      const draft={...item.asset};
+      let draft={...item.asset};
       if(body.title!==undefined)draft.title=String(body.title).trim();
-      if(list(item.type).some(existing=>existing.title.trim()===draft.title.trim()))throw Error('资产库已有同类型的同名资产，请查看差异后修改名称，或跳过这一项');
+      const matches=list(item.type).filter(existing=>existing.title.trim()===draft.title.trim());
+      if(body.importMode==='version'){
+        const existing=rawGet(item.type,safeId(body.assetId));
+        if(!existing||!matches.some(match=>match.id===existing.id))throw Error('请选择同类型的同名资产登记新版本');
+        if(body.expectedUpdatedAt!==existing.updatedAt)throw Error('已登记资产发生变化，请重新识别并查看差异');
+        draft={...existing,...draft,id:existing.id};
+        if(item.type==='skill')draft.variants={...existing.variants,...item.asset.variants};
+      }else{
+        if(body.importMode&&body.importMode!=='rename')throw Error('请选择改名导入或登记为新的版本');
+        if(matches.length)throw Error('资产库已有同类型的同名资产，请改名导入或登记为新的版本');
+      }
       if(body.modelId&&profiledTypes.has(item.type)){draft.assetHarness=item.harness;draft.assetModelId=body.modelId;}
       asset=save(item.type,draft,body.message);
     }
@@ -902,6 +998,22 @@ async function handleApi(req, url) {
     return {ok:true,asset};
   }
   if (segments[0] === 'bootstrap' && method === 'GET') return { hookEvents, assets: Object.fromEntries([...types].map(t => [t, list(t).map(a => t === 'model' ? { ...a, hasKey: !!readJson(keysFile, {})[a.id] } : a)])), settings: settings(), sync: { ...syncStatus(), conflicts: conflictItems() } };
+  if (segments[0] === 'model-test' && method === 'POST') {
+    const draft = body.asset;
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('模型配置无效');
+    const key = typeof draft.apiKey === 'string' && draft.apiKey.trim() ? draft.apiKey.trim() : draft.id ? readJson(keysFile, {})[safeId(draft.id)] : '';
+    const text = await requestModel(draft, key, '请简短回答。', '请回复 OK，验证连接。', 256);
+    return { ok: true, text: text.slice(0, 500) };
+  }
+  if (segments[0] === 'model-application' && method === 'POST') {
+    const restore = body.restore === true;
+    const model = restore ? null : get('model', safeId(body.modelId));
+    if (!restore && !model) throw new Error('模型配置不存在');
+    const projectDirectory = body.software === 'claude' ? assertProject(body.projectId).directory : undefined;
+    const key = model ? readJson(keysFile, {})[model.id] : '';
+    const input = { model, key, software: body.software, projectDirectory, restore };
+    return body.preview === true ? modelApplication.preview(input) : modelApplication.apply(input, body.token);
+  }
   if (segments[0] === 'rule-validate' && method === 'POST') return {ok:true,markdown:renderRule(body.asset)};
   if (segments[0] === 'import-hooks' && method === 'POST') return parseHookConfiguration(body.content,body.harness,body.fileName);
   if (segments[0] === 'import-rule' && method === 'POST') return parseRule(body.content,body.fileName);
@@ -939,6 +1051,13 @@ async function handleApi(req, url) {
     for (const file of plan.files) { fs.mkdirSync(path.dirname(file.path), { recursive: true }); fs.writeFileSync(file.path, file.content, 'utf8'); }
     return { ok: true, files: plan.files.map(x => x.path) };
   }
+  if (segments[0] === 'skill-visualization' && method === 'POST') {
+    const mode = body.mode === 'sync' ? 'sync' : 'visualize';
+    const prompt = graphModelRequest(body.variant, body.files || {}, mode);
+    const config = settings();
+    const text = await callModel(body.modelId, mode === 'sync' ? config.syncGraphSystem || defaultSyncGraphSystem : config.visualizeSystem || defaultVisualizeSystem, prompt, 16000);
+    return parseGraphModelResult(text);
+  }
   if (segments[0] === 'ai' && method === 'POST') {
     const skill = get('skill', body.skillId);
     if (!skill) throw new Error('Skill 不存在');
@@ -958,10 +1077,16 @@ async function handleApi(req, url) {
   safeType(type);
   if (method === 'GET' && !id) return list(type);
   if (method === 'GET' && id && !action) { const item = get(type, id); if (!item) throw new Error('资产不存在'); return type === 'model' ? { ...item, hasKey: !!readJson(keysFile, {})[id] } : item; }
-  if (method === 'POST' && !id) return save(type, body.asset, body.message);
+  if (action === 'issues') {
+    if (!rawGet(type, safeId(id))) throw new Error('资产不存在');
+    if (method === 'GET' && !segments[3]) return assetIssues(type, id);
+    if (['POST', 'PUT', 'DELETE'].includes(method)) return updateAssetIssue(type, id, segments[3], method, body);
+    throw new Error('无效问题记录请求');
+  }
+  if (method === 'POST' && !id) return save(type, body.asset, body.message, body.completedIssues ?? []);
   if (method === 'DELETE' && id) return remove(type, id, body.message);
   if (method === 'GET' && action === 'history') return history(type, id);
-  if (method === 'GET' && action === 'diff') return { diff: diff(type, id, url.searchParams.get('hash')) };
+  if (method === 'GET' && action === 'diff') return diff(type, id, url.searchParams.get('hash'));
   if (method === 'POST' && action === 'select-version') return selectVersion(type, id, body.hash || null);
   if (method === 'POST' && type === 'project' && action === 'local-path') return setProjectPath(id, body.directory || '');
   if (method === 'POST' && action === 'restore') return restore(type, id, body.hash, body.message);

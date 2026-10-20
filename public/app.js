@@ -1,11 +1,16 @@
 import { pluginUI } from './plugins.js';
+import { renderModelFields, bindModelFields } from './model-config.js';
+import { showVersionDiff } from './version-diff.js';
+import { issueIncluded, appendIssueText } from './issue-helpers.js';
+import { skillCanvasShell, mountSkillCanvas } from './skill-canvas.js';
+import { needsGraphSync } from './skill-graph.js';
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]);
 const deep = value => structuredClone(value);
 const labels = { plugin:'Plugins', home:'首页', skill:'Skills', workflow:'多个 Skills 包联动套件', prompt:'系统提示词', hook:'单个 Hook', hookgroup:'Hooks 组', rule:'Rules', agent:'Agent', project:'项目', model:'模型服务', settings:'审查配置', deploy:'一键生效', sync:'远程同步' };
 const icons = { plugin:'▧', home:'⌂', skill:'◇', workflow:'↳', prompt:'≡', hook:'⚡', hookgroup:'⚡', rule:'§', agent:'◈', project:'▣', model:'◉', settings:'⚙', deploy:'↗', sync:'⇄' };
-const state = { assets:{}, sync:{}, section:'home', selected:null, draft:null, variant:'common', query:'', deployment:null, openFields:{}, openYamlGroups:{}, skillsNavOpen:false, hooksNavOpen:false, profileDrafts:{} };
+const state = { issueDrafts:{}, assets:{}, sync:{}, section:'home', selected:null, draft:null, variant:'common', query:'', deployment:null, openFields:{}, openYamlGroups:{}, skillsNavOpen:false, hooksNavOpen:false, profileDrafts:{} };
 const profiledTypes = new Set(['skill','workflow','prompt','agent']);
 const profileFields = {skill:['description','variants','files'],workflow:['description','members','skillIds'],prompt:['description','scope','target','content'],agent:['description','harness','modelId','instructions','skillIds','workflowIds','promptIds','hookIds','hookGroupIds','ruleIds','tools','mcps']};
 const modal = $('#modal');
@@ -78,7 +83,7 @@ function emptyDraft(type) {
   if(type==='prompt') return {...base,scope:'global',target:'',content:''};
   if(type==='agent') return {...base,harness:'claude',instructions:'',hookIds:[],hookGroupIds:[],ruleIds:[],skillIds:[],workflowIds:[],promptIds:[],tools:[],mcps:[],modelId:''};
   if(type==='project') return {...base,directory:'',suiteIds:[],ruleIds:[]};
-  if(type==='model') return {...base,baseUrl:'https://api.anthropic.com',model:'',apiKey:''};
+  if(type==='model') return {...base,protocol:'anthropic',authMode:'key',baseUrl:'https://api.anthropic.com',model:'',apiKey:''};
   if(type==='settings') return {...base,title:'审查与改进提示词',reviewSystem:'',improveSystem:''};
 }
 function selectAsset(id) { state.selected=id; state.draft=deep((state.assets[state.section]||[]).find(x=>x.id===id)); state.profileDrafts={}; state.lastProfileCopy=null; state.variant='common'; state.openFields={}; state.openYamlGroups={}; render(); }
@@ -126,7 +131,7 @@ function renderHome() {
         ${child('多 Skills 包联动套件','归类并说明各 Skill 的作用','workflow','new')}
       </div></div>
       <div class="map-column"><button class="map-parent parent-agent" data-home-section="agent"><span class="map-parent-icon">◈</span><span><strong>Agent</strong><small>${count('agent')} 个 Agent 配置</small></span><b>↗</b></button><div class="map-children">
-        ${child('模型配置','Anthropic 协议服务','model')}
+        ${child('模型配置','多协议 API 服务','model')}
         ${child('资产配置','Skills、套件与 MCP','agent')}
         ${child('单个 Hook','自动检查与事件脚本','hook')}${child('Hooks 组','组合服务于同一用途的 Hooks','hookgroup')}
         ${child('Rules','Claude Code 行为规范','rule')}
@@ -172,15 +177,98 @@ async function showRecentHistory() {
     $$('[data-open-history]').forEach(button=>button.onclick=()=>{ const [type,id]=button.dataset.openHistory.split(':'); modal.close(); selectSection(type); selectAsset(id); showHistory(type,id); });
   } catch(error) { notice(error.message,true); }
 }
-const introText={hookgroup:'把服务于同一用途的多个 Hook 组合在一起，整组关联和应用。',rule:'Claude Code 的 Markdown 行为规范，可适用于整个项目或匹配的文件。',hook:'在会话或工具事件发生时自动运行脚本；按软件管理，与模型版本无关。',workflow:'按用途把多个 Skills 归为一套，并说明每个 Skill 在其中的定位。套件可整体应用到项目。',prompt:'按通用、模型、软件、项目四层组合项目指令。',agent:'指定 Agent 的 Skills、套件、工具、MCP 与提示词。',project:'登记项目并关联默认 Skills 套件；每台电脑分别分配项目目录。',model:'配置 Anthropic 协议模型，用于 Skill 审查与改进。'};
+const introText={hookgroup:'把服务于同一用途的多个 Hook 组合在一起，整组关联和应用。',rule:'Claude Code 的 Markdown 行为规范，可适用于整个项目或匹配的文件。',hook:'在会话或工具事件发生时自动运行脚本；按软件管理，与模型版本无关。',workflow:'按用途把多个 Skills 归为一套，并说明每个 Skill 在其中的定位。套件可整体应用到项目。',prompt:'按通用、模型、软件、项目四层组合项目指令。',agent:'指定 Agent 的 Skills、套件、工具、MCP 与提示词。',project:'登记项目并关联默认 Skills 套件；每台电脑分别分配项目目录。',model:'配置多协议模型 API，用于 AI 辅助功能，也可应用为 Claude Code / Codex 自定义 API。'};
+function textWordCountLabel(text) { return Array.from(String(text||'').replace(/\s/gu,'')).length.toLocaleString('zh-CN')+' 字'; }
+function skillFileText(variant, software) {
+  const frontmatter=variant.frontmatter||{}, lines=['---'];
+  for(const {key} of software==='claude'?[...standard,...claude]:standard) {
+    const value=frontmatter[key];
+    if(value===undefined||value===null||value==='') continue;
+    if(key==='metadata') {
+      if(!Object.keys(value).length) continue;
+      lines.push('metadata:');
+      for(const [name,item] of Object.entries(value)) lines.push('  '+JSON.stringify(String(name))+': '+JSON.stringify(String(item)));
+    } else lines.push(key+': '+(typeof value==='boolean'?value:JSON.stringify(String(value))));
+  }
+  lines.push('---','',(variant.body||'').trim(),'');
+  return lines.join('\n');
+}
+function updateTextWordCounts() {
+  $$('[data-word-count-for]').forEach(counter=>{ const input=document.getElementById(counter.dataset.wordCountFor); if(input) counter.textContent=textWordCountLabel(input.value); });
+  const skillCounter=$('#skill-file-word-count');
+  if(skillCounter) skillCounter.textContent=textWordCountLabel(skillFileText(currentVariant(),state.variant));
+  $$('.resource-word-count').forEach(counter=>{const row=counter.closest('.resource-row');counter.textContent=textWordCountLabel(state.draft.files[row.dataset.resourcePath]);});
+}
 function editorHead(type) { const d=state.draft; return `<div class="editor-head"><div><h2>${d.id?escapeHtml(d.title||d.name):'新建'+labels[type]}</h2><p>${d.activeVersion?`本机正使用历史版本 ${escapeHtml(d.activeVersion.slice(0,7))} · 选择版本不产生提交；保存修改才创建新版本`:d.id?`最近更新 ${new Date(d.updatedAt).toLocaleString('zh-CN')}`:'填写内容后保存为首个 Git 版本'}</p></div><div class="editor-actions">${d.id?`<button class="btn btn-sm" id="history-btn">版本历史</button><button class="btn btn-sm btn-danger" id="delete-btn">删除</button>`:''}${type==='skill'&&!d.id?'<button class="btn btn-sm" id="import-skill">导入已有 Skill</button><button class="btn btn-sm" id="import-local-skill">从本地目录导入</button><input id="local-skill-directory" type="file" webkitdirectory directory multiple hidden>':''}<button class="btn btn-sm btn-primary" id="save-btn">保存版本</button></div></div>`; }
 function profileSnapshot(type, draft) { return Object.fromEntries(profileFields[type].filter(key=>Object.hasOwn(draft,key)).map(key=>[key,deep(draft[key])])); }
 function profileChoice() {
   const d=state.draft, key=`${d.assetHarness||''}:${d.assetModelId||''}`, configured=!!d.profiles?.[key];
   return `<div class="asset-profile"><div class="section-title">此资产的适用版本</div><div class="form-grid"><div class="field"><label class="field-label" for="asset-harness">Harness 框架 <span class="pill">必选</span></label><select id="asset-harness"><option value="">请选择框架</option><option value="claude" ${d.assetHarness==='claude'?'selected':''}>Claude Code</option><option value="codex" ${d.assetHarness==='codex'?'selected':''}>Codex</option></select></div><div class="field"><label class="field-label" for="asset-model">模型版本 <span class="pill">必选</span></label><select id="asset-model">${options('model',d.assetModelId)}</select></div></div><p class="small-note">${!state.assets.model?.length?'请先在「模型服务」添加常用模型。':configured?'已保存此组合；编辑后保存会创建新的 Git 版本。':d.profiles&&Object.keys(d.profiles).length?'此组合尚未配置；可填写内容并保存新版本。':'保存时会把这份内容绑定到所选组合。'}</p>${state.lastProfileCopy&&!configured?'<button class="btn btn-sm" id="copy-profile">复制上一组合内容</button>':''}</div>`;
 }
-function renderForm(type) { return `<div class="editor">${editorHead(type)}${profiledTypes.has(type)?profileChoice():''}${({skill:renderSkillForm,hook:renderHookForm,hookgroup:renderHookGroupForm,rule:renderRuleForm,workflow:renderWorkflowForm,prompt:renderPromptForm,agent:renderAgentForm,project:renderProjectForm,model:renderModelForm})[type]()}</div>`; }
-function field(label,key,value,opts={}) { return `<div class="field ${opts.wide?'wide':''}"><label class="field-label" for="f-${key}">${label}${opts.required?'<span class="pill">必填</span>':''}</label>${opts.textarea?`<textarea id="f-${key}" data-bind="${key}" ${opts.code?'class="code"':''} placeholder="${escapeHtml(opts.placeholder||'')}">${escapeHtml(value)}</textarea>`:`<input id="f-${key}" data-bind="${key}" value="${escapeHtml(value)}" placeholder="${escapeHtml(opts.placeholder||'')}">`}${opts.hint?`<span class="hint">${opts.hint}</span>`:''}</div>`; }
+function renderForm(type) { return `<div class="editor">${editorHead(type)}${profiledTypes.has(type)?profileChoice():''}${({skill:renderSkillForm,hook:renderHookForm,hookgroup:renderHookGroupForm,rule:renderRuleForm,workflow:renderWorkflowForm,prompt:renderPromptForm,agent:renderAgentForm,project:renderProjectForm,model:renderModelForm})[type]()}${renderAssetIssues(type,state.draft)}</div>`; }
+
+function issueDraft(type, asset) {
+  return state.issueDrafts[`${type}/${asset.id || 'new'}`] ||= { text:'', edits:{}, completedOpen:false };
+}
+function renderAssetIssues(type, asset) {
+  const draft=issueDraft(type,asset), records=asset.issues||[];
+  const pending=records.filter(issue=>!issue.completedAt), completed=records.filter(issue=>issue.completedAt);
+  const row=issue=>{
+    const version=issue.versions?.at(-1), editing=Object.hasOwn(draft.edits,issue.id);
+    return `<article class="issue-row ${issue.completedAt?'issue-completed':''}" data-issue-id="${issue.id}">
+      <div class="issue-row-head"><label class="issue-check"><input type="checkbox" data-issue-toggle="${issue.id}" ${issue.completedAt?'checked':''}><span>${issue.completedAt?'已完成':'待解决'}</span></label><div class="issue-actions"><button class="btn btn-sm" data-issue-edit="${issue.id}">${editing?'保存修改':'编辑'}</button>${editing?`<button class="btn btn-sm" data-issue-cancel="${issue.id}">取消</button>`:''}<button class="btn btn-sm btn-danger" data-issue-delete="${issue.id}">删除</button></div></div>
+      ${editing?`<textarea class="issue-textarea" data-issue-text="${issue.id}" aria-label="编辑问题记录" maxlength="10000">${escapeHtml(draft.edits[issue.id])}</textarea>`:`<p class="issue-text">${escapeHtml(issue.text)}</p>`}
+      <div class="issue-meta">${issue.sourceVersion?`发现于 ${escapeHtml(issue.sourceVersion.slice(0,7))} · `:''}${new Date(issue.createdAt).toLocaleString('zh-CN')}${issue.completedAt?' · 完成于 '+new Date(issue.completedAt).toLocaleString('zh-CN'):''}
+      ${version?`<button class="issue-version" data-issue-history="${issue.id}">${issueIncluded(issue)?'已纳入版本':'此前纳入版本'} ${escapeHtml(version.hash.slice(0,7))}</button>`:''}${issue.completedAt&&!issueIncluded(issue)?'<span class="pill">待纳入版本</span>':''}</div>
+    </article>`;
+  };
+  return `<section class="asset-issues" id="asset-issues" aria-label="待解决问题"><div class="issues-heading"><h3>待解决问题</h3><span class="pill gray">${pending.length} 项待解决 · ${completed.length} 项已完成</span></div><p class="small-note">随手记下遇到的问题或修改想法，内容可随时编辑。记录保存在本机；完成后打勾，保存版本时可选取填入说明。</p>
+    ${asset.id?`<div class="issue-compose"><textarea class="issue-textarea" id="new-issue-text" aria-label="新的问题记录" maxlength="10000" placeholder="先记下来，之后再处理……">${escapeHtml(draft.text)}</textarea><div class="issue-compose-actions"><span class="small-note">Ctrl / ⌘ + Enter 快速保存</span><button class="btn btn-sm btn-primary" id="add-issue">＋ 添加记录</button></div></div><div class="issue-list">${pending.length?pending.map(row).join(''):'<p class="small-note">暂无待解决问题。</p>'}</div>${completed.length?`<details class="completed-issues" ${draft.completedOpen?'open':''}><summary>已完成 · ${completed.length} 项${completed.some(issue=>!issueIncluded(issue))?' · 有待纳入版本的记录':''}</summary><div class="issue-list">${completed.map(row).join('')}</div></details>`:''}`:'<p class="small-note">先保存资产，即可添加问题记录。</p>'}
+  </section>`;
+}
+function bindAssetIssues(type, asset) {
+  const board=$('#asset-issues');
+  if(!board||!asset.id)return;
+  const draft=issueDraft(type,asset);
+  const redraw=()=>{
+    if(state.draft!==asset||state.section!==type)return;
+    board.outerHTML=renderAssetIssues(type,asset);
+    bindAssetIssues(type,asset);
+  };
+  const mutate=async(issue,method,body={})=>{
+    board.classList.add('loading');
+    try {
+      const records=await api(`${type}/${asset.id}/issues${issue?'/'+issue.id:''}`,method,{...body,...(issue?{expectedUpdatedAt:issue.updatedAt}:{})});
+      asset.issues=records;
+      const saved=state.assets[type]?.find(item=>item.id===asset.id);if(saved)saved.issues=deep(records);
+      if(!issue)draft.text='';else if(Object.hasOwn(body,'text')||method==='DELETE')delete draft.edits[issue.id];
+      if(body.completed)draft.completedOpen=true;
+      redraw();
+      notice('问题记录已保存。');
+    } catch(error) {
+      board.classList.remove('loading');
+      const checkbox=issue&&$(`[data-issue-toggle="${issue.id}"]`,board);if(checkbox)checkbox.checked=!!issue.completedAt;
+      notice(error.message,true);
+    }
+  };
+  $('#new-issue-text',board).oninput=event=>draft.text=event.target.value;
+  $('#add-issue',board).onclick=()=>mutate(null,'POST',{text:draft.text});
+  $('#new-issue-text',board).onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();$('#add-issue',board).click();}};
+  $('details.completed-issues',board)?.addEventListener('toggle',event=>draft.completedOpen=event.target.open);
+  for(const issue of asset.issues||[]) {
+    $(`[data-issue-toggle="${issue.id}"]`,board).onchange=event=>mutate(issue,'PUT',{completed:event.target.checked});
+    $(`[data-issue-edit="${issue.id}"]`,board).onclick=()=>{
+      if(Object.hasOwn(draft.edits,issue.id))return mutate(issue,'PUT',{text:draft.edits[issue.id]});
+      draft.edits[issue.id]=issue.text;redraw();$(`[data-issue-text="${issue.id}"]`)?.focus();
+    };
+    const input=$(`[data-issue-text="${issue.id}"]`,board);
+    if(input){input.oninput=event=>draft.edits[issue.id]=event.target.value;input.onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();mutate(issue,'PUT',{text:draft.edits[issue.id]});}};}
+    $(`[data-issue-cancel="${issue.id}"]`,board)?.addEventListener('click',()=>{delete draft.edits[issue.id];redraw();});
+    $(`[data-issue-delete="${issue.id}"]`,board).onclick=async()=>{if(await askConfirm('删除问题记录','删除后无法恢复，确定删除这条记录？','删除记录'))await mutate(issue,'DELETE');};
+    $(`[data-issue-history="${issue.id}"]`,board)?.addEventListener('click',()=>showHistory(type,asset.id));
+  }
+}
+function field(label,key,value,opts={}) { return `<div class="field ${opts.wide?'wide':''}"><label class="field-label" for="f-${key}">${label}${opts.required?'<span class="pill">必填</span>':''}${opts.textarea&&key==='content'&&['prompt','rule'].includes(state.section)?`<span class="pill gray" data-word-count-for="f-${key}" title="正文非空白字符数">${textWordCountLabel(value)}</span>`:''}</label>${opts.textarea?`<textarea id="f-${key}" data-bind="${key}" ${opts.code?'class="code"':''} placeholder="${escapeHtml(opts.placeholder||'')}">${escapeHtml(value)}</textarea>`:`<input id="f-${key}" data-bind="${key}" value="${escapeHtml(value)}" placeholder="${escapeHtml(opts.placeholder||'')}">`}${opts.hint?`<span class="hint">${opts.hint}</span>`:''}</div>`; }
 function fieldSpec(s, f, variant, compact=false) {
   const value=f[s.key], required=s.required&&variant!=='claude';
   const tags=`${required?'<span class="pill">必须</span>':''}${['作用','最佳实践','例子'].map(tag=>`<button class="tag" data-help="${s.key}" data-help-tag="${tag}">${tag}</button>`).join('')}<button class="check-btn" data-check="${s.key}" title="检查此项">✓ 检查</button>`;
@@ -210,17 +298,19 @@ function renderResourceGroup(category, files) {
 }
 function renderSkillForm() {
   const d=state.draft;
-  const v=d.variants[state.variant]||d.variants.common;
+  const variants=d.variants||{};
+  if(!variants[state.variant]) state.variant=['common','claude','codex'].find(name=>variants[name])||Object.keys(variants)[0];
+  const v=variants[state.variant];
   const specs=state.variant==='claude'?[...standard,...claude]:standard;
   return `<div class="callout"><strong>设计原则</strong> · 一个 Skill 是可发现、按需加载、可复用、可测试的能力包。保持 SKILL.md 为执行导航与核心 SOP，把详细知识放到 references。</div>
   <div class="section-title">基本信息</div><div class="form-grid">${field('显示名称','title',d.title,{required:true})}${field('用途摘要','description',d.description,{placeholder:'用于资产列表展示'})}</div>
-  <div class="section-title">YAML front matter</div><div class="toolbar"><p>这里只先显示 name 和 description；其他字段按需展开。${state.variant==='codex'?'Codex 未提供 Skill 级工具预批准，故不显示 allowed-tools。':state.variant==='common'?'通用规范的 allowed-tools 为实验性字段，请在明确支持的 Claude Code 模板中设置。':''}</p><button class="btn btn-sm" id="full-example">查看完整示例</button></div><div class="tabs">${[['common','通用标准'],['claude','Claude Code'],['codex','Codex']].map(([id,label])=>`<button class="tab ${state.variant===id?'active':''}" data-variant="${id}">${label}</button>`).join('')}</div>
+  <div class="section-title">YAML front matter</div><div class="toolbar"><p>这里只先显示 name 和 description；其他字段按需展开。${state.variant==='codex'?'Codex 未提供 Skill 级工具预批准，故不显示 allowed-tools。':state.variant==='common'?'通用规范的 allowed-tools 为实验性字段，请在明确支持的 Claude Code 模板中设置。':''}</p><button class="btn btn-sm" id="full-example">查看完整示例</button></div><div class="tabs">${[['common','通用标准'],['claude','Claude Code'],['codex','Codex']].filter(([id])=>variants[id]).map(([id,label])=>`<button class="tab ${state.variant===id?'active':''}" data-variant="${id}">${label}</button>`).join('')}</div>
   <div class="yaml-primary">${specs.slice(0,2).map(s=>fieldSpec(s,v.frontmatter,state.variant)).join('')}</div><details class="yaml-secondary" id="yaml-secondary" ${state.openYamlGroups[state.variant]?'open':''}><summary class="yaml-secondary-head"><strong>其他 front matter 字段</strong><span class="yaml-group-status">${specs.length-2} 项 · 点击${state.openYamlGroups[state.variant]?'收起':'展开'}</span><b aria-hidden="true">⌄</b></summary><div class="yaml-secondary-body">${specs.slice(2).map(s=>optionalYamlField(s,v.frontmatter,state.variant)).join('')}</div></details>
-  <div class="section-title">正文 · 执行导航</div><div class="field"><textarea class="code" id="skill-body" placeholder="Purpose / Core workflow / Input / Output / Verification...">${escapeHtml(v.body||'')}</textarea><span class="hint">建议包含 Purpose、Core workflow、Input、Output、Key Points、Edge cases、Tools/resources、Verification。</span></div>
+  ${skillCanvasShell()}<details class="skill-body-details" ${!v.graph||needsGraphSync(v)?'open':''}><summary>SKILL.md · 正文编辑（已有画板时，文字修改后需 AI 同步）</summary><div class="section-title">SKILL.md · 正文编辑 <span class="pill gray" id="skill-file-word-count" title="当前版本完整 SKILL.md 的非空白字符数，包含 YAML front matter">${textWordCountLabel(skillFileText(v,state.variant))}</span></div><div class="field"><textarea class="code" id="skill-body" placeholder="Purpose / Core workflow / Input / Output / Verification...">${escapeHtml(v.body||'')}</textarea><span class="hint">建议包含 Purpose、Core workflow、Input、Output、Key Points、Edge cases、Tools/resources、Verification。</span></div></details>
   <div class="section-title">资源文件</div><div class="small-note">脚本仅保存与部署，不在本助手内执行。支持文本文件和 10 MB 以内的图片、模板、数据文件。</div><div class="resource-groups">${['scripts','references','assets'].map(category=>renderResourceGroup(category,d.files)).join('')}</div>
   <div class="divider"></div><div class="editor-actions"><button class="btn btn-quiet" id="validate-skill">检查 Skill</button><button class="btn" id="preview-skill">预览 SKILL.md</button>${d.id?`<button class="btn" id="review-skill">AI 审查</button><button class="btn" id="improve-skill">AI 改进</button>`:''}</div><div id="validation-result" class="status-line"></div>`;
 }
-function resourceRow(name,content) { const binary=typeof content!=='string', [category,...parts]=name.split('/'); return `<div class="stack-row resource-row" data-resource-path="${escapeHtml(name)}" data-resource-category="${category}"><span class="path-prefix">${category}/</span><input class="resource-name" aria-label="资源文件名" value="${escapeHtml(parts.join('/'))}" placeholder="文件名"><input class="resource-content" aria-label="资源内容" value="${binary?`二进制文件 · ${Math.floor((content.data||'').length*0.75)} 字节`:escapeHtml(content)}" ${binary?'disabled':''} placeholder="文件内容">${binary?'':`<button class="resource-edit" title="编辑内容">✎</button>`}<button class="resource-remove" title="删除">×</button></div>`; }
+function resourceRow(name,content) { const binary=typeof content!=='string', [category,...parts]=name.split('/'); return `<div class="stack-row resource-row" data-resource-path="${escapeHtml(name)}" data-resource-category="${category}"><span class="path-prefix">${category}/</span><input class="resource-name" aria-label="资源文件名" value="${escapeHtml(parts.join('/'))}" placeholder="文件名"><input class="resource-content" aria-label="资源内容" value="${binary?`二进制文件 · ${Math.floor((content.data||'').length*0.75)} 字节`:escapeHtml(content)}" ${binary?'disabled':''} placeholder="文件内容">${binary?'':`${state.section==='skill'?`<span class="pill gray resource-word-count" title="文件非空白字符数">${textWordCountLabel(content)}</span>`:''}<button class="resource-edit" title="编辑内容">✎</button>`}<button class="resource-remove" title="删除">×</button></div>`; }
 function renderWorkflowForm() { const d=state.draft; d.members ||= (d.skillIds||[]).map(skillId=>({skillId,role:''})); return `<div class="form-grid">${field('套件名称','title',d.title,{required:true,wide:true})}${field('用途','description',d.description,{required:true,wide:true,textarea:true,placeholder:'这套 Skills 帮助处理什么任务，适合在什么项目中使用'})}</div><div class="section-title">场景所包含的 Skills</div><p class="small-note">选择成员 Skill，并说明它在套件中的定位和作用。成员之间无需固定执行顺序。</p><div class="stack suite-members" id="flow-list">${d.members.map((member,i)=>flowRow(member,i)).join('')}</div><button class="btn btn-sm" id="add-step" style="margin-top:10px">＋ 添加 Skill</button><div class="callout" style="margin-top:18px">应用到项目时，会一次部署套件里的全部 Skills，并把各自的定位写入项目指令。</div>`; }
 function flowRow(member,i) { return `<div class="suite-member"><div class="suite-member-head"><span class="number">${i+1}</span><select class="flow-skill" aria-label="成员 Skill">${options('skill',member.skillId,'选择 Skill')}</select><button class="flow-remove" title="移除这个 Skill" aria-label="移除这个 Skill">×</button></div><label class="field-label" for="suite-role-${i}">在套件中的定位和作用</label><textarea class="flow-role" id="suite-role-${i}" placeholder="例如：先整理输入文件结构；处理文件分析请求时调用">${escapeHtml(member.role||'')}</textarea></div>`; }
 function renderPromptForm() { const d=state.draft; return `<div class="form-grid">${field('提示词名称','title',d.title,{required:true})}<div class="field"><label class="field-label">层级</label><select id="scope"><option value="global" ${d.scope==='global'?'selected':''}>通用</option><option value="model" ${d.scope==='model'?'selected':''}>模型</option><option value="software" ${d.scope==='software'?'selected':''}>Harness 框架</option><option value="project" ${d.scope==='project'?'selected':''}>项目</option></select></div><div class="field wide" id="target-wrap">${targetControl(d)}</div>${field('说明','description',d.description,{wide:true})}${field('提示词正文','content',d.content,{wide:true,textarea:true,code:true,required:true})}</div><div class="callout" style="margin-top:19px">组合顺序固定为：通用 → 模型 → Harness 框架 → 项目。同层按名称排序；Agent 也可显式关联提示词。</div>`; }
@@ -229,9 +319,10 @@ function renderAgentForm() { const d=state.draft, harness=d.assetHarness||d.harn
 function checkboxList(type, selected) { const all=state.assets[type]||[]; return all.length?`<div class="chips">${all.map(a=>`<label class="chip"><input type="checkbox" data-link="${type}" value="${a.id}" ${selected.includes(a.id)?'checked':''}> ${escapeHtml(a.title)}</label>`).join('')}</div>`:`<div class="small-note">尚无${labels[type]}，可先到左侧新建。</div>`; }
 function mcpRow(m={name:'',command:'',args:[],env:{}}) { return `<div class="stack-row mcp-row" style="display:grid;grid-template-columns:1fr 1fr auto"><input class="mcp-name" value="${escapeHtml(m.name)}" placeholder="名称，如 filesystem"><input class="mcp-command" value="${escapeHtml(m.command)}" placeholder="命令，如 npx"><button class="mcp-remove">×</button><input class="mcp-args" value="${escapeHtml((m.args||[]).join(' '))}" placeholder="参数，以空格分隔"><input class="mcp-env" value="${escapeHtml(Object.entries(m.env||{}).map(([k,v])=>`${k}=${v}`).join('; '))}" placeholder="环境变量 KEY=value; KEY2=value"></div>`; }
 function renderProjectForm() { const d=state.draft; return `<div class="form-grid">${field('项目名称','title',d.title,{required:true})}${field('说明','description',d.description,{wide:true,textarea:true})}<div class="field wide"><label class="field-label" for="f-directory">本机项目路径 <span class="pill gray">仅保存在这台电脑</span></label><div class="path-picker"><input id="f-directory" value="${escapeHtml(d.directory||'')}" placeholder="待分配 · 点击右侧选择文件夹" readonly><button class="btn" id="pick-project-directory" type="button">选择文件夹</button>${d.directory?'<button class="btn btn-sm" id="clear-project-directory" type="button">清除</button>':''}</div><span class="hint">选择后自动识别已有资产，逐项确认导入；新项目保存后开始识别。</span></div></div><div class="section-title">默认应用的 Skills 套件</div>${checkboxList('workflow',d.suiteIds||[])}<div class="section-title">默认应用的 Claude Code Rules</div>${checkboxList('rule',d.ruleIds||[])}<div class="section-title">识别项目现有资产</div><p class="small-note">逐项确认导入 Skills、Claude Rules、系统提示词、Claude Agent 和命令 Hooks。已确认的相同内容不会重复导入；源文件改变后会重新等待确认。</p><div class="quick-links"><button class="btn" id="project-discovery" ${!d.id||!d.directory?'disabled':''}>识别 / 继续确认</button><button class="btn btn-sm" id="project-discovery-skipped" ${!d.id||!d.directory?'disabled':''}>重新查看已跳过项</button></div><div class="section-title">当前配置资产</div><p class="small-note">查看此项目实际写入的资产与文件状态。默认关联需在一键生效后才会写入项目。</p><div class="quick-links"><button class="btn" id="project-configuration-refresh" ${!d.id||!d.directory?'disabled':''}>刷新配置资产</button></div><div id="project-configuration" aria-live="polite">${!d.id?'保存项目后可查看。':!d.directory?'请先分配本机项目路径。':'正在读取…'}</div><div class="callout" style="margin-top:20px">资产始终保存在用户目录的 Agent_assets_manager。项目路径不上传 GitHub；可稍后再分配。</div>`; }
-function renderModelForm() { const d=state.draft; return `<div class="form-grid">${field('配置名称','title',d.title,{required:true})}${field('模型 ID','model',d.model,{required:true,placeholder:'claude-sonnet-4-5'})}${field('Anthropic 协议 API 地址','baseUrl',d.baseUrl,{required:true,wide:true,placeholder:'https://api.anthropic.com'})}<div class="field wide"><label class="field-label">API Key <span class="pill gray">本机私有</span></label><input id="api-key" type="password" value="" autocomplete="new-password" placeholder="${d.hasKey?'已保存；留空表示不修改':'输入 API Key'}"><span class="hint">Key 不进入 Git 版本库，页面不会回显。请只连接你信任的服务地址。</span></div>${field('说明','description',d.description,{wide:true})}</div>`; }
+function renderModelForm() { return renderModelFields(state.draft, field, escapeHtml); }
 function bindForm(type) {
   const d=state.draft;
+  bindAssetIssues(type,d);
   $$('[data-bind]').forEach(el=>el.oninput=()=>{ d[el.dataset.bind]=el.value; if(el.dataset.bind==='title') $('.editor-head h2').textContent=el.value||'未命名'; });
   $('#save-btn').onclick=()=>saveCurrent();
   $('#history-btn')?.addEventListener('click',()=>showHistory(type,d.id));
@@ -267,7 +358,11 @@ function bindForm(type) {
   if(type==='prompt') bindPrompt();
   if(type==='agent') bindAgent();
   if(type==='project') bindProject();
-  if(type==='model') $('#api-key').oninput=e=>d.apiKey=e.target.value;
+  if(type==='model') bindModelFields({draft:d,api,notice,render,showModal,projects:state.assets.project||[],escapeHtml});
+  if(['skill','prompt','rule'].includes(type)) {
+    $('#editor-panel').oninput=updateTextWordCounts;
+    $('#editor-panel').onchange=updateTextWordCounts;
+  }
 }
 function currentVariant() { return state.draft.variants[state.variant]; }
 function renderRuleForm() {
@@ -378,7 +473,6 @@ function bindHook() {
   $('#hook-validate').onclick=async()=>{try{const result=await api('hook-validate','POST',{asset:d});showModal('Hook 配置预览',`<p class="small-note">基础格式检查通过。这里使用示例路径，项目生效预览会显示实际路径。</p><pre class="markdown-preview">${escapeHtml(JSON.stringify(result.config,null,2))}</pre>`);}catch(error){notice(error.message,true);}};
   $('#hook-run-test').onclick=async()=>{const button=$('#hook-run-test');try{const input=JSON.parse($('#hook-test-input').value);button.disabled=true;button.textContent='测试中…';const result=await api('hook-test','POST',{asset:d,input,projectId:$('#hook-test-project').value});$('#hook-test-result').innerHTML=`<div class="callout" style="margin-top:14px"><strong>${escapeHtml(result.summary)}</strong>${result.matched?`<br>退出码：${escapeHtml(result.exitCode??'无')} · 耗时：${result.durationMs} ms`:''}</div>${result.matched?`<pre class="markdown-preview">${escapeHtml(JSON.stringify(result,null,2))}</pre>`:''}`;}catch(error){notice(error.message,true);}finally{button.disabled=false;button.textContent='运行模拟测试';}};
 }
-function ensureVariant(name) { if(!state.draft.variants[name]) { const variant=deep(state.draft.variants.common); if(name==='codex') delete variant.frontmatter['allowed-tools']; state.draft.variants[name]=variant; } }
 function copySkillName(name) {
   if(!name) return name;
   const used=new Set((state.assets.skill||[]).flatMap(skill=>Object.values(skill.variants||{}).map(variant=>variant.frontmatter?.name).filter(Boolean)));
@@ -414,7 +508,7 @@ function importExistingSkill() {
         target.frontmatter.name=copySkillName(target.frontmatter.name);
         target.descriptionParts=deep(sourceVariant.descriptionParts||{what:target.frontmatter.description||'',when:'',keywords:''});
       }
-      if(parts.has('body')) target.body=sourceVariant.body||'';
+      if(parts.has('body')) { target.body=sourceVariant.body||''; if(sourceVariant.graph&&!target.graph)target.graph=deep(sourceVariant.graph); }
       draft.variants[variantName]=target;
     }
     if(parts.has('files')) draft.files={...draft.files,...deep(source.files||{})};
@@ -508,12 +602,21 @@ async function importLocalSkillDirectory(fileList) {
   finally { const input=$('#local-skill-directory'); if(input) input.value=''; }
 }
 function bindSkill() {
-  $$('[data-variant]').forEach(b=>b.onclick=()=>{ ensureVariant(b.dataset.variant); state.variant=b.dataset.variant; render(); });
+  $$('[data-variant]').forEach(b=>b.onclick=()=>{ if(!state.draft.variants?.[b.dataset.variant]) return; state.variant=b.dataset.variant; render(); });
   $('#yaml-secondary').ontoggle=event=>{ state.openYamlGroups[state.variant]=event.target.open; $('.yaml-group-status',event.target).textContent=`${$$('[data-yaml-field]',event.target).length} 项 · 点击${event.target.open?'收起':'展开'}`; };
   $('#full-example').onclick=()=>showModal(`${state.variant==='claude'?'Claude Code':state.variant==='codex'?'Codex':'通用'} · 完整示例`,`<pre class="markdown-preview">${escapeHtml(skillExample(state.variant))}</pre>`);
   $$('[data-front]').forEach(el=>el.oninput=()=>{ const f=currentVariant().frontmatter; if(el.dataset.front==='metadata') { const map={}; for(const line of el.value.split('\n')) { const at=line.indexOf(':'); if(at>0) map[line.slice(0,at).trim()]=line.slice(at+1).trim(); } f.metadata=map; } else if(['disable-model-invocation','user-invocable'].includes(el.dataset.front)) { if(el.value==='') delete f[el.dataset.front]; else f[el.dataset.front]=el.value==='true'; } else f[el.dataset.front]=el.value; });
   $$('[data-part]').forEach(el=>el.oninput=()=>{ const v=currentVariant(); v.descriptionParts=v.descriptionParts||{}; v.descriptionParts[el.dataset.part]=el.value; v.frontmatter.description=[v.descriptionParts.what,v.descriptionParts.when,v.descriptionParts.keywords?`相关表达：${v.descriptionParts.keywords}`:''].filter(Boolean).join('。').replace(/。。/g,'。'); $('#description-preview').textContent=v.frontmatter.description; });
   $('#skill-body').oninput=e=>currentVariant().body=e.target.value;
+  const canvasVariant=currentVariant();
+  const updateCanvasState=()=>{
+    const body=$('#skill-body');if(body&&body.value!==canvasVariant.body)body.value=canvasVariant.body;
+    const pending=Object.values(state.draft.variants||{}).some(needsGraphSync);
+    const button=$('#save-btn');if(button){button.disabled=pending;button.title=pending?'正文已修改，请先 AI 同步到现有图':'';}
+    updateTextWordCounts();
+  };
+  mountSkillCanvas($('#skill-canvas'),{variant:canvasVariant,files:()=>state.draft.files||{},models:state.assets.model||[],isCurrent:()=>state.section==='skill'&&currentVariant()===canvasVariant,onChange:updateCanvasState,notice});
+  updateCanvasState();
   $$('[data-help]').forEach(b=>b.onclick=()=>showHelp(b.dataset.help,b.dataset.helpTag));
   $$('[data-check]').forEach(b=>b.onclick=()=>checkField(b.dataset.check,b));
   $$('[data-yaml-field]').forEach(details=>details.ontoggle=()=>{
@@ -576,7 +679,7 @@ function bindResources() {
       const content=state.draft.files[old]; delete state.draft.files[old]; state.draft.files[next]=content; render();
     };
     $('.resource-content',row).oninput=e=>{ state.draft.files[path()]=e.target.value; };
-    $('.resource-edit',row)?.addEventListener('click',()=>{ const name=path(), content=state.draft.files[name]; showModal(`编辑 ${name}`,`<textarea id="resource-large" class="code" style="width:100%;min-height:290px">${escapeHtml(content)}</textarea><div class="modal-footer"><button class="btn btn-primary" id="resource-done">完成</button></div>`); $('#resource-done').onclick=()=>{state.draft.files[name]=$('#resource-large').value;modal.close();render();}; });
+    $('.resource-edit',row)?.addEventListener('click',()=>{ const name=path(), content=state.draft.files[name]; showModal(`编辑 ${name}`,`${state.section==='skill'?`<div class="field-label">文件内容 <span class="pill gray" data-word-count-for="resource-large" title="文件非空白字符数">${textWordCountLabel(content)}</span></div>`:''}<textarea id="resource-large" class="code" style="width:100%;min-height:290px">${escapeHtml(content)}</textarea><div class="modal-footer"><button class="btn btn-primary" id="resource-done">完成</button></div>`); $('#resource-large').oninput=()=>{const counter=$('[data-word-count-for="resource-large"]');if(counter)counter.textContent=textWordCountLabel($('#resource-large').value);}; $('#resource-done').onclick=()=>{state.draft.files[name]=$('#resource-large').value;modal.close();render();}; });
     $('.resource-remove',row).onclick=()=>{ delete state.draft.files[path()]; render(); };
   });
 }
@@ -668,7 +771,24 @@ function bindAgent() {
   $('#add-mcp').onclick=()=>{d.mcps.push({name:'',command:'',args:[],env:{}});render();};
   $$('.mcp-row').forEach((row,i)=>{for(const key of ['name','command','args','env']) $(`.mcp-${key}`,row).oninput=e=>{if(key==='args')d.mcps[i].args=e.target.value.split(/\s+/).filter(Boolean);else if(key==='env'){const env={};for(const pair of e.target.value.split(';')){const at=pair.indexOf('=');if(at>0)env[pair.slice(0,at).trim()]=pair.slice(at+1).trim();}d.mcps[i].env=env;}else d.mcps[i][key]=e.target.value;}; $('.mcp-remove',row).onclick=()=>{d.mcps.splice(i,1);render();}; });
 }
-async function saveCurrent() { try { const d=state.draft; const discover=state.section==='project'&&d.directory&&(!d.id||state.assets.project.find(p=>p.id===d.id)?.directory!==d.directory); if(profiledTypes.has(state.section)&&(!d.assetHarness||!d.assetModelId)) throw new Error('请同时选择 Harness 框架和模型版本'); const message=await askVersionMessage('保存资产版本'); if(message===null)return; const asset=await api(state.section,'POST',{asset:d,message}); state.selected=asset.id; await refresh(); state.draft=deep(asset); state.profileDrafts={};state.lastProfileCopy=null; render(); notice(`已保存 Git 版本：${message}`); if(discover)await reviewProjectAssets(asset.id); } catch(e){notice(e.message,true);} }
+async function saveCurrent() {
+  const type=state.section, d=state.draft;
+  try {
+    if(type==='skill'&&Object.values(d.variants||{}).some(needsGraphSync))throw new Error('正文已修改，请先点击「AI 同步到现有图」再保存版本');
+    const discover=type==='project'&&d.directory&&(!d.id||state.assets.project.find(p=>p.id===d.id)?.directory!==d.directory);
+    if(profiledTypes.has(type)&&(!d.assetHarness||!d.assetModelId)) throw new Error('请同时选择 Harness 框架和模型版本');
+    const issues=d.id?await api(`${type}/${d.id}/issues`):[];
+    const submission=await askVersionMessage('保存资产版本',{issues});
+    if(submission===null)return;
+    const asset=await api(type,'POST',{asset:d,...submission});
+    state.selected=asset.id;
+    await refresh();
+    state.draft=deep(asset);
+    state.profileDrafts={};state.lastProfileCopy=null;
+    render();notice(`已保存 Git 版本：${submission.message}`);
+    if(discover)await reviewProjectAssets(asset.id);
+  } catch(e){notice(e.message,true);}
+}
 let projectReviewRunning=false;
 async function reviewProjectAssets(projectId,includeSkipped=false,fileScan=null) {
   if(projectReviewRunning||(!projectId&&!fileScan))return;
@@ -701,12 +821,19 @@ async function reviewProjectAssets(projectId,includeSkipped=false,fileScan=null)
                 for(const key of new Set([...Object.keys(oldValue),...Object.keys(newValue)]))compare(oldValue[key],newValue[key],field?field+'.'+key:key);
               }else differences.push({field,oldValue,newValue});
             };
-            const metadata=new Set(['id','type','createdAt','updatedAt','activeVersion','latestUpdatedAt','profiles','hasKey']);
+            const metadata=new Set(['id','type','createdAt','updatedAt','activeVersion','latestUpdatedAt','profiles','hasKey','issues']);
             const oldAsset=Object.fromEntries(Object.entries(existing).filter(([key])=>!metadata.has(key)));
             compare(oldAsset,{...item.asset,title},'');
             const display=value=>value===undefined?'（未设置）':typeof value==='string'?value:JSON.stringify(value,null,2);
-            return `<div class="callout" role="alert"><strong>发现同名${escapeHtml(labels[item.type])}：${escapeHtml(existing.title)}</strong><p>请查看差异，修改名称后导入，或跳过这一项。</p></div><details open><summary>与已登记资产的差异 · ${differences.length} 项</summary>${differences.length?differences.map(change=>`<p><strong>${escapeHtml(change.field)}</strong></p><div class="form-grid"><div><strong>已登记</strong><pre class="diff">${escapeHtml(display(change.oldValue))}</pre></div><div><strong>本次识别</strong><pre class="diff">${escapeHtml(display(change.newValue))}</pre></div></div>`).join(''):'<p class="small-note">内容、配置和资源完全一致。</p>'}</details>`;
+            return `<div class="callout" role="alert"><strong>发现同名${escapeHtml(labels[item.type])}：${escapeHtml(existing.title)}</strong><p>请查看差异后选择改名导入，或将本次识别的内容登记为该资产的新版本。历史版本会保留。</p><div class="quick-links"><button class="btn" type="button" data-discovery-rename>改名导入</button><button class="btn btn-primary" type="button" data-discovery-version="${escapeHtml(existing.id)}">登记为新的版本</button></div><p></p></div><details open><summary>与已登记资产的差异 · ${differences.length} 项</summary>${differences.length?differences.map(change=>`<p><strong>${escapeHtml(change.field)}</strong></p><div class="form-grid"><div><strong>已登记</strong><pre class="diff">${escapeHtml(display(change.oldValue))}</pre></div><div><strong>本次识别</strong><pre class="diff">${escapeHtml(display(change.newValue))}</pre></div></div>`).join(''):'<p class="small-note">内容、配置和资源完全一致。</p>'}</details>`;
           }).join('');
+          $$('[data-discovery-rename]').forEach(button=>button.onclick=()=>{
+            const input=$('#discovery-title');let number=2;
+            let name=title+'（导入）';
+            while((state.assets[item.type]||[]).some(asset=>asset.title.trim()===name))name=title+'（导入 '+number+++'）';
+            input.value=name;updateDuplicates();input.focus();input.select();
+          });
+          $$('[data-discovery-version]').forEach(button=>button.onclick=()=>act('import',matches.find(asset=>asset.id===button.dataset.discoveryVersion)));
           $('#discovery-confirm').disabled=!item.importable||matches.length>0;
         };
         $('#discovery-title')?.addEventListener('input',updateDuplicates);
@@ -716,12 +843,12 @@ async function reviewProjectAssets(projectId,includeSkipped=false,fileScan=null)
         const finish=value=>{if(settled)return;choice=value;if(modal.open)modal.close();else closed();};
         modal.addEventListener('close',closed,{once:true});
         $('#discovery-pause').onclick=()=>finish(null);
-        const act=async action=>{
+        const act=async (action,existing=null)=>{
           const buttons=$$('#modal-body button');buttons.forEach(b=>b.disabled=true);
           try{
             if(fileScan){
-              if(action==='import')await api('hook','POST',{asset:{...item.asset,title:$('#discovery-title').value},message:$('#discovery-message').value});
-            }else await api('project-import','POST',{projectId,key:item.key,fingerprint:item.fingerprint,action,title:$('#discovery-title')?.value,modelId:$('#discovery-model')?.value,message:$('#discovery-message')?.value});
+              if(action==='import')await api('hook','POST',{asset:{...item.asset,title:$('#discovery-title').value,...(existing?{id:existing.id}:{})},message:$('#discovery-message').value});
+            }else await api('project-import','POST',{projectId,key:item.key,fingerprint:item.fingerprint,action,importMode:existing?'version':'rename',assetId:existing?.id,expectedUpdatedAt:existing?.latestUpdatedAt||existing?.updatedAt,title:$('#discovery-title')?.value,modelId:$('#discovery-model')?.value,message:$('#discovery-message')?.value});
             finish(action);
           }catch(error){if(!settled){$('#discovery-error').textContent=error.message;buttons.forEach(b=>b.disabled=false);updateDuplicates();}}
         };
@@ -771,7 +898,7 @@ async function importHookFiles(fileList) {
   }catch(error){notice(error.message,true);}
 }
 async function deleteCurrent() { if(!await askConfirm('删除资产',`确定删除「${state.draft.title}」？此操作仍可通过 Git 历史恢复。`))return; const message=await askVersionMessage('记录删除原因'); if(message===null)return; try{await api(`${state.section}/${state.draft.id}`,'DELETE',{message});state.draft=null;state.selected=null;await refresh();notice('资产已删除并记录 Git 版本。');}catch(e){notice(e.message,true);} }
-function showModal(title,html) { $('#modal-title').textContent=title;$('#modal-body').innerHTML=html;if(!modal.open)modal.showModal(); }
+function showModal(title,html) { modal.classList.remove('version-diff-modal');$('#modal-title').textContent=title;$('#modal-body').innerHTML=html;if(!modal.open)modal.showModal(); }
 function modalAnswer(title,body,submitText,readValue) {
   return new Promise(resolve=>{
     showModal(title,`${body}<div class="modal-footer"><button class="btn" id="dialog-cancel">取消</button><button class="btn btn-primary" id="dialog-submit">${submitText}</button></div>`);
@@ -781,16 +908,32 @@ function modalAnswer(title,body,submitText,readValue) {
     const finish=value=>{ if(settled)return; settled=true; modal.removeEventListener('close',onClose); modal.close(); resolve(value); };
     $('#dialog-cancel').onclick=()=>finish(null);
     $('#dialog-submit').onclick=()=>{ const result=readValue(); if(result!==undefined) finish(result); };
-    $('#version-message-input')?.addEventListener('keydown',event=>{ if(event.key==='Enter') { event.preventDefault(); $('#dialog-submit').click(); } });
+    $('#version-message-input')?.addEventListener('keydown',event=>{ if(event.key==='Enter' && (event.target.tagName!=='TEXTAREA'||event.ctrlKey||event.metaKey)) { event.preventDefault(); $('#dialog-submit').click(); } });
     $('#version-message-input')?.focus();
   });
 }
-function askVersionMessage(title) {
-  return modalAnswer(title,`<div class="field"><label class="field-label" for="version-message-input">Git 版本说明 <span class="pill">必填</span></label><input id="version-message-input" maxlength="200" placeholder="例如：完善 Skill 的触发说明"><span class="hint">至少 3 个字；这条说明会显示在版本历史中。</span><span id="version-message-error" class="dialog-error" role="alert"></span></div>`,'保存版本',()=>{
-    const message=$('#version-message-input').value.trim();
-    if(message.length<3) { $('#version-message-error').textContent='版本说明至少需要 3 个字。'; return undefined; }
-    return message;
+
+function askVersionMessage(title,config) {
+  const candidates=(config?.issues||[]).filter(issue=>issue.completedAt&&!issueIncluded(issue)).sort((a,b)=>b.completedAt.localeCompare(a.completedAt));
+  const selected=new Map();
+  const answer=modalAnswer(title,`<div class="field"><label class="field-label" for="version-message-input">Git 版本说明 <span class="pill">必填</span></label>${config?'<textarea id="version-message-input" rows="5" maxlength="10000" placeholder="例如：完善 Skill 的触发说明"></textarea>':'<input id="version-message-input" maxlength="200" placeholder="例如：完善 Skill 的触发说明">'}<span class="hint">${config?'至少 3 个字；可继续补充文字，Ctrl / ⌘ + Enter 提交。':'至少 3 个字；这条说明会显示在版本历史中。'}</span><span id="version-message-error" class="dialog-error" role="alert"></span></div>
+    ${config?`<div class="version-issue-section"><h3>已完成的问题</h3><p class="small-note">点击追加到上方说明。包含此前完成但尚未纳入版本的记录。</p><div class="version-issue-list">${candidates.length?candidates.map(issue=>`<button type="button" class="version-issue" data-version-issue="${issue.id}"><span class="issue-text">${escapeHtml(issue.text)}</span><span class="pill">＋ 添加</span></button>`).join(''):'<p class="small-note">暂无待纳入版本的已完成问题。</p>'}</div></div>`:''}`,'保存版本',()=>{
+      const message=$('#version-message-input').value.trim();
+      if(message.length<3){$('#version-message-error').textContent='版本说明至少需要 3 个字。';return undefined;}
+      return config?{message,completedIssues:[...selected.values()]}:message;
+    });
+  $$('[data-version-issue]').forEach(button=>button.onclick=()=>{
+    const issue=candidates.find(item=>item.id===button.dataset.versionIssue);
+    if(selected.has(issue.id))return;
+    const input=$('#version-message-input');
+    const next=appendIssueText(input.value,issue.text);
+    if(next.length>10000){$('#version-message-error').textContent='添加后版本说明将超过 10000 字，请先精简文字。';return;}
+    input.value=next;
+    selected.set(issue.id,{id:issue.id,updatedAt:issue.updatedAt});
+    button.disabled=true;$('.pill',button).textContent='已添加';
+    $('#version-message-error').textContent='';input.focus();input.setSelectionRange(input.value.length,input.value.length);
   });
+  return answer;
 }
 function askConfirm(title,message) { return modalAnswer(title,`<p class="dialog-message">${escapeHtml(message)}</p>`,'确认',()=>true); }
 $('#modal-close').onclick=()=>modal.close(); modal.addEventListener('click',e=>{if(e.target===modal)modal.close();});
@@ -800,7 +943,7 @@ async function showHistory(type,id) {
     const current=(state.assets[type]||[]).find(item=>item.id===id);
     showModal('版本历史',`<p class="small-note">选择历史版本只改变这台电脑当前使用的内容，不创建 Git 提交。编辑后点击「保存版本」，只会生成一个新提交。</p><div class="history">${entries.length?entries.map(entry=>`<div class="history-row"><div class="history-top"><strong>${escapeHtml(entry.message)}</strong><span class="scope-path">${entry.short}</span></div><p>${new Date(entry.date).toLocaleString('zh-CN')}</p><div class="buttons"><button class="btn btn-sm" data-diff="${entry.hash}">查看差异</button><button class="btn btn-sm btn-quiet" data-select-version="${entry.hash}">${current?.activeVersion===entry.hash?'正在使用':'在本机使用'}</button></div></div>`).join(''):'暂无历史'}</div><div class="modal-footer"><button class="btn" id="select-latest-version">使用最新版本</button></div>`);
     $$('[data-diff]').forEach(button=>button.onclick=async()=>{
-      try { const result=await api(`${type}/${id}/diff?hash=${button.dataset.diff}`); showModal('与上个版本的差异',`<pre class="diff">${escapeHtml(result.diff||'此版本无文本差异')}</pre><div class="modal-footer"><button class="btn" id="back-history">返回历史</button></div>`); $('#back-history').onclick=()=>showHistory(type,id); } catch(error) { notice(error.message,true); }
+      try { const result=await api(`${type}/${id}/diff?hash=${button.dataset.diff}`); showVersionDiff(showModal,result,`<div class="modal-footer"><button class="btn" id="back-history">返回历史</button></div>`); $('#back-history').onclick=()=>showHistory(type,id); } catch(error) { notice(error.message,true); }
     });
     $$('[data-select-version]').forEach(button=>button.onclick=async()=>{try{await api(`${type}/${id}/select-version`,'POST',{hash:button.dataset.selectVersion});modal.close();await refresh();selectAsset(id);notice('已在本机使用所选历史版本；尚未创建新提交。');}catch(error){notice(error.message,true);}});
     $('#select-latest-version').onclick=async()=>{try{await api(`${type}/${id}/select-version`,'POST',{});modal.close();await refresh();selectAsset(id);notice('已在本机使用最新版本。');}catch(error){notice(error.message,true);}};
@@ -816,8 +959,12 @@ async function showTrash(type) {
     });
   } catch(error) { notice(error.message,true); }
 }
-function aiDialog(mode) { const models=state.assets.model||[]; if(!models.length)return notice('请先在「模型服务」配置 Anthropic 协议模型。',true); showModal(mode==='review'?'Skill 审查':'Skill 改进',`<div class="form-grid"><div class="field wide"><label class="field-label">使用模型</label><select id="ai-model">${options('model','', '请选择模型')}</select></div>${mode==='improve'?`<div class="field wide"><label class="field-label">遇到的问题</label><textarea id="ai-problem" placeholder="例如：用户要求处理扫描件时没有触发这个 Skill"></textarea></div>`:''}</div><div class="modal-footer"><button class="btn btn-primary" id="ai-run">${mode==='review'?'开始审查':'生成改进建议'}</button></div><div id="ai-output"></div>`); $('#ai-run').onclick=async()=>{const modelId=$('#ai-model').value;if(!modelId)return notice('请选择模型',true);const button=$('#ai-run');button.disabled=true;button.textContent='模型处理中…';try{const result=await api(`ai/${mode}`,'POST',{skillId:state.draft.id,software:state.variant,modelId,problem:$('#ai-problem')?.value});$('#ai-output').innerHTML=`<div class="section-title">${mode==='review'?'审查意见':'改进建议'}</div><div class="ai-result">${escapeHtml(result.proposal?.summary||result.text)}</div>${result.proposal?.frontmatter&&result.proposal?.body?'<div class="modal-footer"><button class="btn btn-primary" id="apply-proposal">应用到编辑器</button></div>':''}`;$('#apply-proposal')?.addEventListener('click',()=>{state.draft.variants[state.variant].frontmatter=result.proposal.frontmatter;state.draft.variants[state.variant].body=result.proposal.body;state.draft.variants[state.variant].descriptionParts={what:result.proposal.frontmatter.description||'',when:'',keywords:''};modal.close();render();notice('建议已放入编辑器。请检查并保存 Git 版本。');});}catch(e){notice(e.message,true);}finally{button.disabled=false;button.textContent=mode==='review'?'开始审查':'生成改进建议';}}; }
-function renderSettings() { const d=state.draft; $('#content').innerHTML=`<div class="intro"><div><h2>审查与改进系统提示词</h2><p>这两段指令会作为模型调用的 system 内容，可按你的团队标准修改。</p></div></div><div class="panel editor"><div class="editor-head"><div><h2>模型审查规则</h2><p>所有修改都要求 Git 版本说明</p></div><button class="btn btn-primary" id="settings-save">保存版本</button></div><div class="form-grid">${field('审查系统提示词','reviewSystem',d.reviewSystem,{wide:true,textarea:true,code:true})}${field('改进系统提示词','improveSystem',d.improveSystem,{wide:true,textarea:true,code:true})}</div>${d.id?'<button class="btn btn-sm" id="settings-history" style="margin-top:18px">版本历史</button>':''}</div>`; $$('[data-bind]').forEach(el=>el.oninput=e=>d[el.dataset.bind]=e.target.value); $('#settings-save').onclick=async()=>{const message=await askVersionMessage('保存审查配置');if(message===null)return;try{const saved=await api('settings','POST',{asset:d,message});state.draft=deep(saved);await refresh();notice('审查规则已保存。');}catch(e){notice(e.message,true);}};$('#settings-history')?.addEventListener('click',()=>showHistory('settings',d.id)); }
+function aiDialog(mode) { const models=state.assets.model||[]; if(!models.length)return notice('请先在「模型服务」配置模型 API。',true); showModal(mode==='review'?'Skill 审查':'Skill 改进',`<div class="form-grid"><div class="field wide"><label class="field-label">使用模型</label><select id="ai-model">${options('model','', '请选择模型')}</select></div>${mode==='improve'?`<div class="field wide"><label class="field-label">遇到的问题</label><textarea id="ai-problem" placeholder="例如：用户要求处理扫描件时没有触发这个 Skill"></textarea></div>`:''}</div><div class="modal-footer"><button class="btn btn-primary" id="ai-run">${mode==='review'?'开始审查':'生成改进建议'}</button></div><div id="ai-output"></div>`); $('#ai-run').onclick=async()=>{const modelId=$('#ai-model').value;if(!modelId)return notice('请选择模型',true);const button=$('#ai-run');button.disabled=true;button.textContent='模型处理中…';try{const result=await api(`ai/${mode}`,'POST',{skillId:state.draft.id,software:state.variant,modelId,problem:$('#ai-problem')?.value});$('#ai-output').innerHTML=`<div class="section-title">${mode==='review'?'审查意见':'改进建议'}</div><div class="ai-result">${escapeHtml(result.proposal?.summary||result.text)}</div>${result.proposal?.frontmatter&&result.proposal?.body?'<div class="modal-footer"><button class="btn btn-primary" id="apply-proposal">应用到编辑器</button></div>':''}`;$('#apply-proposal')?.addEventListener('click',()=>{state.draft.variants[state.variant].frontmatter=result.proposal.frontmatter;state.draft.variants[state.variant].body=result.proposal.body;state.draft.variants[state.variant].descriptionParts={what:result.proposal.frontmatter.description||'',when:'',keywords:''};modal.close();render();notice('建议已放入编辑器。请检查并保存 Git 版本。');});}catch(e){notice(e.message,true);}finally{button.disabled=false;button.textContent=mode==='review'?'开始审查':'生成改进建议';}}; }
+function renderSettings() {
+  const d=state.draft;
+  $('#content').innerHTML=`<div class="intro"><div><h2>审查、改进与可视化提示词</h2><p>管理模型审查、自动转图及文字修改同步使用的系统指令。</p></div></div><div class="panel editor"><div class="editor-head"><div><h2>模型处理规则</h2><p>所有修改都要求 Git 版本说明</p></div><button class="btn btn-primary" id="settings-save">保存版本</button></div><div class="form-grid">${field('审查系统提示词','reviewSystem',d.reviewSystem,{wide:true,textarea:true,code:true})}${field('改进系统提示词','improveSystem',d.improveSystem,{wide:true,textarea:true,code:true})}${field('Skill 自动可视化提示词','visualizeSystem',d.visualizeSystem,{wide:true,textarea:true,code:true})}${field('文字变更同步画板提示词','syncGraphSystem',d.syncGraphSystem,{wide:true,textarea:true,code:true})}</div>${d.id?'<button class="btn btn-sm" id="settings-history" style="margin-top:18px">版本历史</button>':''}${renderAssetIssues('settings',d)}</div>`;
+  bindAssetIssues('settings',d);$$('[data-bind]').forEach(el=>el.oninput=e=>d[el.dataset.bind]=e.target.value);$('#settings-save').onclick=saveCurrent;$('#settings-history')?.addEventListener('click',()=>showHistory('settings',d.id));
+}
 function uiProfile(item,software,modelId) { if(!item) return null; if(!item.profiles||!Object.keys(item.profiles).length) return item; const profile=item.profiles[`${software}:${modelId}`]; return profile?{...item,...profile}:null; }
 function deployCheckboxList(type,selected,software,modelId) { const all=(state.assets[type]||[]).filter(item=>['hook','hookgroup','rule'].includes(type)?item.harness===software:uiProfile(item,software,modelId)); return all.length?`<div class="chips">${all.map(item=>`<label class="chip"><input type="checkbox" data-link="${type}" value="${item.id}" ${selected.includes(item.id)?'checked':''}> ${escapeHtml(item.title)}</label>`).join('')}</div>`:'<div class="small-note">这个组合尚无可用资产。</div>'; }
 function deployAgentOptions(selected,software,modelId) { const all=(state.assets.agent||[]).filter(item=>uiProfile(item,software,modelId)); return `<option value="">不指定 Agent</option>${all.map(item=>`<option value="${item.id}" ${item.id===selected?'selected':''}>${escapeHtml(item.title)}</option>`).join('')}`; }
