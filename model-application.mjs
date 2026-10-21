@@ -9,7 +9,6 @@ import { normalizeApplicationMapping, claudeModelSlots } from './public/model-ma
 import { codexModelCatalog } from './model-catalog.mjs';
 
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
 
 function object(value) {
@@ -58,6 +57,17 @@ function shellQuote(value) {
   return `"${value}"`;
 }
 
+// Object containers are not ownership boundaries: only generated leaves belong to us.
+// This also narrows older records that treated an entire provider/picker as owned.
+function managedLeaves(owned) {
+  if (!owned.written.exists || !object(owned.written.value) || !Object.keys(owned.written.value).length) return [owned];
+  return Object.entries(owned.written.value).flatMap(([key, value]) => managedLeaves({
+    path: [...owned.path, key],
+    before: owned.before.exists && object(owned.before.value) ? field(owned.before.value, [key]) : { exists: false },
+    written: { exists: true, value }
+  }));
+}
+
 export function targetModel(model, software, selectedModel) {
   validateModel(model);
   if (!['claude', 'codex'].includes(software)) throw new Error('请选择 Claude Code 或 Codex');
@@ -90,9 +100,7 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
     const records = recordsText ? JSON.parse(recordsText) : {};
     const recordId = hash(path.resolve(file));
     const previous = records[recordId];
-    if (previous) for (const owned of previous.fields) {
-      if (!same(field(document, owned.path), owned.written)) throw new Error('助手管理的 API 配置已被外部修改，请先恢复为上次应用值或手动处理；已停止覆盖');
-    }
+    if (previous) previous.fields = previous.fields.flatMap(managedLeaves);
     const serialize = value => software === 'claude' ? JSON.stringify(value, null, 2) + '\n' : stringifyToml(value);
     const legacyFiles = [];
     if (software === 'claude' && !restore) {
@@ -106,9 +114,7 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
         const legacyBefore = read(legacyFile);
         let legacyDocument;
         try { legacyDocument = legacyBefore === null ? {} : JSON.parse(legacyBefore); } catch { throw new Error('旧项目 API 配置无法解析，已停止迁移'); }
-        for (const owned of legacy.fields) {
-          if (!same(field(legacyDocument, owned.path), owned.written)) throw new Error('旧项目 API 配置已被外部修改，请处理后再应用用户级配置');
-        }
+        legacy.fields = legacy.fields.flatMap(managedLeaves);
         for (const owned of legacy.fields) setField(legacyDocument, owned.path, owned.before);
         const legacyContent = legacyBefore !== null && hash(legacyBefore) === legacy.writtenHash ? legacy.restoreContent : JSON.stringify(legacyDocument, null, 2) + '\n';
         legacyFiles.push({ file: legacyFile, before: legacyBefore, content: legacyContent });
@@ -120,10 +126,10 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
     const oldCatalog = previous?.catalog;
     if (oldCatalog) {
       assertOrdinaryPath(catalogFile);
-      if (oldCatalog.file !== catalogFile || hash(read(catalogFile) || '') !== oldCatalog.writtenHash) throw new Error('助手管理的模型目录已被外部修改，已停止覆盖和撤销');
+      if (oldCatalog.file !== catalogFile) throw new Error('模型目录恢复路径与目标配置不一致');
     }
     let content, nextRecord, mapping;
-    const warnings = [];
+    const warnings = ['确认后将覆盖助手管理的 API 字段，即使它们已被手动或客户端修改；其他配置保留。撤销会恢复这些字段首次应用前的值。'];
     if (restore) {
       if (!previous) throw new Error('此位置没有可撤销的助手 API 配置');
       for (const owned of previous.fields) setField(document, owned.path, owned.before);
@@ -165,6 +171,9 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
         const catalogBefore = read(catalogFile), catalogContent = codexModelCatalog(mapping);
         additionalFiles.push({ file: catalogFile, before: catalogBefore, content: catalogContent });
         updates.push(
+          { path: ['model_providers', 'asset_manager', 'env_key'], entry: { exists: false } },
+          { path: ['model_providers', 'asset_manager', 'experimental_bearer_token'], entry: { exists: false } },
+          ...(model.authMode === 'none' ? [{ path: ['model_providers', 'asset_manager', 'auth'], entry: { exists: false } }] : []),
           { path: ['model_catalog_json'], entry: { exists: true, value: catalogFile } },
           { path: ['review_model'], entry: { exists: true, value: mapping.reviewModel } },
           { path: ['model_reasoning_effort'], entry: mapping.models.find(row => row.id === target.model).reasoning === 'none' ? { exists: false } : { exists: true, value: 'medium' } }
@@ -175,8 +184,8 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
       // Recover the baseline before applying again, retaining unrelated user changes.
       if (previous) for (const owned of previous.fields) setField(document, owned.path, owned.before);
       const baseline = !previous ? before : before !== null && hash(before) === previous.writtenHash ? previous.restoreContent : serialize(document);
-      const fields = updates.map(update => ({ path: update.path, before: field(document, update.path), written: update.entry }));
-      for (const update of updates) setField(document, update.path, update.entry);
+      const fields = updates.flatMap(update => managedLeaves({ path: update.path, before: field(document, update.path), written: update.entry }));
+      for (const owned of fields) setField(document, owned.path, owned.written);
       content = serialize(document);
       nextRecord = { modelId: model.id, selectedModel: target.model, path: file, software, fields, restoreContent: baseline, writtenHash: hash(content) };
       nextRecord.modelMapping = mapping;
@@ -210,7 +219,12 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
       return value;
     };
     const redact = (text, empty) => text === null ? empty : result.software === 'claude' ? JSON.stringify(redactValue(parse(text)), null, 2) + '\n' : stringifyToml(redactValue(parse(text)));
-    return { path: result.file, scope: result.scope, before: redact(result.before, '（文件不存在）'), after: redact(result.content, '（撤销后删除此文件）'), token: result.token, restore: result.restore, modelMapping: result.mapping, warnings: result.warnings, additionalFiles: result.additionalFiles.map(item => ({ path: item.file, before: item.before === null ? '（文件不存在）' : JSON.stringify(redactValue(JSON.parse(item.before)), null, 2), after: item.content === null ? '（撤销后删除此文件）' : JSON.stringify(redactValue(JSON.parse(item.content)), null, 2) })), legacyRestorations: result.legacyFiles.map(item => ({ path: item.file, before: redact(item.before, '（文件不存在）'), after: redact(item.content, '（撤销后删除此文件）') })) };
+    const redactExtra = text => {
+      if (text === null) return '（文件不存在／确认后删除）';
+      try { return JSON.stringify(redactValue(JSON.parse(text)), null, 2); }
+      catch { return '（非 JSON 原始文本，共 ' + text.length + ' 个字符；按预览操作替换／恢复）'; }
+    };
+    return { path: result.file, scope: result.scope, before: redact(result.before, '（文件不存在）'), after: redact(result.content, '（撤销后删除此文件）'), token: result.token, restore: result.restore, modelMapping: result.mapping, warnings: result.warnings, additionalFiles: result.additionalFiles.map(item => ({ path: item.file, before: redactExtra(item.before), after: redactExtra(item.content) })), legacyRestorations: result.legacyFiles.map(item => ({ path: item.file, before: redact(item.before, '（文件不存在）'), after: redact(item.content, '（撤销后删除此文件）') })) };
   }
 
   function atomicWrite(file, content) {

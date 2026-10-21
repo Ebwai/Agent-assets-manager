@@ -86,7 +86,7 @@ test('Codex 用户级 provider：保留其他配置，密钥用命令提供，�
   assert.equal(fs.readFileSync(file, 'utf8'), original);
 });
 
-test('文件、模型、密钥变化使预览过期，外部修改受管字段时停止应用和撤销', t => {
+test('文件、模型、密钥变化使预览过期；受管字段被外部修改后可重新预览并覆盖', t => {
   const { app, model, projectDirectory, claudeHome } = setup(t);
   const input = { model, key: 'private-key', software: 'claude', projectDirectory };
   const preview = app.preview(input);
@@ -97,9 +97,15 @@ test('文件、模型、密钥变化使预览过期，外部修改受管字段�
   app.apply(input, app.preview(input).token);
   const external = JSON.parse(fs.readFileSync(preview.path, 'utf8')); external.env.ANTHROPIC_BASE_URL = 'https://manual.example';
   fs.writeFileSync(preview.path, JSON.stringify(external));
-  assert.throws(() => app.preview(input), /外部修改/);
-  assert.throws(() => app.preview({ software: 'claude', projectDirectory, restore: true }), /外部修改/);
+  const changed = app.preview(input);
+  assert.match(changed.before, /manual.example/);
   assert.equal(JSON.parse(fs.readFileSync(preview.path, 'utf8')).env.ANTHROPIC_BASE_URL, 'https://manual.example');
+  app.apply(input, changed.token);
+  assert.equal(JSON.parse(fs.readFileSync(preview.path, 'utf8')).env.ANTHROPIC_BASE_URL, 'https://example.com');
+  const edited = JSON.parse(fs.readFileSync(preview.path, 'utf8')); edited.model = 'manual-again'; edited.other = 'keep';
+  fs.writeFileSync(preview.path, JSON.stringify(edited));
+  const restore = { software: 'claude', restore: true }; app.apply(restore, app.preview(restore).token);
+  assert.deepEqual(JSON.parse(fs.readFileSync(preview.path, 'utf8')), { other: 'keep' });
 });
 
 test('撤销保留无关手动修改，初次创建的文件可完全恢复为不存在', t => {
@@ -182,13 +188,15 @@ test('旧项目覆盖随用户级应用预览恢复，预览零写入并保留�
   assert.equal(JSON.parse(fs.readFileSync(preview.path, 'utf8')).model, 'test-model');
 });
 
-test('旧项目受管字段被修改则拒绝迁移，无关修改使旧预览失效', t => {
+test('旧项目受管字段被修改后仍可迁移，预览后的修改使旧令牌失效', t => {
   const context = setup(t), legacy = seedLegacy(context);
   const input = { model: context.model, key: 'private-key', software: 'claude', legacyProjectDirectories: [context.projectDirectory] };
   const preview = context.app.preview(input);
   fs.writeFileSync(legacy.file, JSON.stringify({ model: 'test-model', other: true }));
   assert.throws(() => context.app.apply(input, preview.token), /重新预览/);
   fs.writeFileSync(legacy.file, JSON.stringify({ model: 'manual-change' }));
-  assert.throws(() => context.app.preview(input), /外部修改/);
   assert.equal(fs.existsSync(preview.path), false);
+  const refreshed = context.app.preview(input); assert.match(refreshed.legacyRestorations[0].before, /manual-change/);
+  context.app.apply(input, refreshed.token);
+  assert.equal(JSON.parse(fs.readFileSync(legacy.file, 'utf8')).model, undefined);
 });

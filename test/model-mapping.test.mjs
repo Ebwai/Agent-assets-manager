@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { parse as parseToml } from 'smol-toml';
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { normalizeApplicationMapping } from '../public/model-mapping.js';
 import { codexModelCatalog } from '../model-catalog.mjs';
 import { createModelApplication } from '../model-application.mjs';
@@ -52,7 +53,7 @@ test('Claude 别名、指定版本和完整列表投影；重新应用恢复不�
   const restored = JSON.parse(fs.readFileSync(file)); assert.deepEqual(restored, { ...original, permissions: { allow: ['Read'], deny: ['Edit'] } });
 });
 
-test('Codex 目录与主配置零写入预览、保护外部编辑、保留原目录设置及失败回滚', t => {
+test('Codex 目录与主配置零写入预览、覆盖受管目录外部编辑、保留原目录设置及失败回滚', t => {
   const { app, codexHome, privateDir } = setup(t), file = path.join(codexHome, 'config.toml');
   const original = 'model="old"\nmodel_catalog_json="C:/original.json"\nmodel_reasoning_effort="high"\n[model_providers.other]\nbase_url="https://other.example"\n';
   fs.writeFileSync(file, original);
@@ -68,9 +69,13 @@ test('Codex 目录与主配置零写入预览、保护外部编辑、保留原�
   const config = parseToml(fs.readFileSync(file, 'utf8')); assert.equal(config.model, 'deepseek-flash'); assert.equal(config.review_model, 'deepseek-flash'); assert.equal(config.model_reasoning_effort, undefined);
   const catalog = JSON.parse(fs.readFileSync(catalogFile)); assert.deepEqual(catalog.models.map(row => row.slug), service.models); assert.equal(catalog.models[0].use_responses_lite, false);
   const content = fs.readFileSync(catalogFile, 'utf8'); preview = app.preview(input); fs.writeFileSync(catalogFile, content + ' ');
-  assert.throws(() => app.apply(input, preview.token), /目录.*外部修改/);
-  assert.throws(() => app.preview({ software: 'codex', restore: true }), /目录.*外部修改/);
-  fs.writeFileSync(catalogFile, content);
+  assert.throws(() => app.apply(input, preview.token), /重新预览/);
+  app.apply(input, app.preview(input).token);
+  assert.equal(fs.readFileSync(catalogFile, 'utf8'), content);
+  fs.writeFileSync(catalogFile, 'manually edited invalid JSON');
+  const rebuild = app.preview(input); assert.match(rebuild.additionalFiles[0].before, /非 JSON/);
+  app.apply(input, rebuild.token); assert.equal(fs.readFileSync(catalogFile, 'utf8'), content);
+  fs.writeFileSync(catalogFile, content + ' ');
   const restore = { software: 'codex', restore: true }; app.apply(restore, app.preview(restore).token);
   assert.equal(fs.readFileSync(file, 'utf8'), original); assert.equal(fs.existsSync(catalogFile), false);
 });
@@ -85,4 +90,55 @@ test('已安装 Codex 实际读取生成目录，模型 ID 与能力通过客户
   assert.equal(result.status, 0, result.stderr);
   const parsed = JSON.parse(result.stdout); assert.deepEqual(parsed.models.map(row => row.slug), service.models);
   assert.equal(parsed.models[0].context_window, 65536); assert.equal(parsed.models[0].supported_reasoning_levels.length, 0); assert.equal(parsed.models[1].supported_reasoning_levels.length, 3);
+});
+
+test('受管嵌套字段按新值覆盖，同一 provider 和 picker 内的非受管设置保留', t => {
+  const { app, codexHome, claudeHome } = setup(t);
+  const codexInput = { model: service, key: 'private-key', software: 'codex' };
+  app.apply(codexInput, app.preview(codexInput).token);
+  const file = path.join(codexHome, 'config.toml');
+  fs.appendFileSync(file, '\n[model_providers.asset_manager.extra]\nkeep = "yes"\n');
+  let config = parseToml(fs.readFileSync(file, 'utf8'));
+  config.model = 'changed-by-client';
+  config.model_providers.asset_manager.base_url = 'https://manually.changed';
+  config.model_providers.asset_manager.request_max_retries = 9;
+  fs.writeFileSync(file, stringifyToml(config));
+  app.apply(codexInput, app.preview(codexInput).token);
+  config = parseToml(fs.readFileSync(file, 'utf8'));
+  assert.equal(config.model, service.model); assert.equal(config.model_providers.asset_manager.base_url, service.baseUrl);
+  assert.equal(config.model_providers.asset_manager.request_max_retries, 9);
+  assert.equal(config.model_providers.asset_manager.extra.keep, 'yes');
+  const claudeInput = { model: service, key: 'private-key', software: 'claude' };
+  app.apply(claudeInput, app.preview(claudeInput).token);
+  const claudeFile = path.join(claudeHome, 'settings.json');
+  let settings = JSON.parse(fs.readFileSync(claudeFile));
+  settings.model = 'manual';
+  settings.modelPicker.customOption = { keep: true };
+  settings.env.OTHER = 'keep';
+  fs.writeFileSync(claudeFile, JSON.stringify(settings));
+  app.apply(claudeInput, app.preview(claudeInput).token);
+  settings = JSON.parse(fs.readFileSync(claudeFile));
+  assert.equal(settings.model, service.model); assert.deepEqual(settings.modelPicker.customOption, { keep: true }); assert.equal(settings.env.OTHER, 'keep');
+});
+
+test('旧版整表管理记录兼容为叶子字段，覆盖已改值但保留用户后来添加的同表字段', t => {
+  const { app, privateDir, codexHome } = setup(t);
+  const file = path.join(codexHome, 'config.toml');
+  const beforeProvider = { name: 'Original', base_url: 'https://original.example', local_option: 'keep' };
+  const writtenProvider = { name: 'Old managed', base_url: 'https://old.example', wire_api: 'responses', requires_openai_auth: false };
+  const written = 'model="old"\n';
+  const current = 'model="manual"\n[model_providers.asset_manager]\nname="manual"\nbase_url="https://manual.example"\nwire_api="responses"\nrequires_openai_auth=false\nrequest_max_retries=7\nlocal_option="edited"\n';
+  fs.writeFileSync(file, current);
+  const digest = value => crypto.createHash('sha256').update(value).digest('hex');
+  fs.writeFileSync(path.join(privateDir, 'model-applications.json'), JSON.stringify({ [digest(path.resolve(file))]: { software: 'codex', modelId: service.id, fields: [{ path: ['model'], before: { exists: true, value: 'original-model' }, written: { exists: true, value: 'old' } }, { path: ['model_providers', 'asset_manager'], before: { exists: true, value: beforeProvider }, written: { exists: true, value: writtenProvider } }], restoreContent: 'model="original-model"\n', writtenHash: digest(written) } }));
+  const input = { model: service, key: 'private-key', software: 'codex' };
+  const preview = app.preview(input); assert.match(preview.before, /manual.example/);
+  app.apply(input, preview.token);
+  let config = parseToml(fs.readFileSync(file, 'utf8'));
+  assert.equal(config.model, service.model); assert.equal(config.model_providers.asset_manager.base_url, service.baseUrl);
+  assert.equal(config.model_providers.asset_manager.request_max_retries, 7); assert.equal(config.model_providers.asset_manager.local_option, 'edited');
+  const restore = { software: 'codex', restore: true }; app.apply(restore, app.preview(restore).token);
+  config = parseToml(fs.readFileSync(file, 'utf8'));
+  assert.equal(config.model, 'original-model'); assert.equal(config.model_providers.asset_manager.base_url, 'https://original.example');
+  assert.equal(config.model_providers.asset_manager.request_max_retries, 7); assert.equal(config.model_providers.asset_manager.local_option, 'edited');
 });
