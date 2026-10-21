@@ -1,4 +1,5 @@
 import { modelProtocols, modelProtocol, aiModelId, serviceModelIds } from './model-protocols.js';
+import { openModelApplication } from './model-application.js';
 
 export function renderModelFields(d, field, escapeHtml) {
   const protocol = modelProtocols.find(item => item.id === modelProtocol(d)) || modelProtocols[0];
@@ -55,45 +56,5 @@ export function bindModelFields({ draft, api, notice, render, showModal, escapeH
     catch (error) { output.textContent = `连接失败：${error.message}`; }
     finally { button.disabled = false; }
   };
-  $('#model-apply').onclick = async () => {
-    const modelId = draft.id, button = $('#model-apply');
-    let service = draft;
-    try { if (modelId) service = await api('model/' + modelId); }
-    catch (error) { return notice(error.message, true); }
-    if (!button.isConnected) return;
-    const ids = serviceModelIds(service);
-    showModal('应用用户级自定义 API', `<p class="small-note">使用已保存供应商中的模型。两种软件都应用到本机用户级，不需要选择项目；只预览不会改动文件。</p><div class="form-grid">
-      <div class="field"><label class="field-label" for="model-apply-software">目标软件</label><select id="model-apply-software"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></div>
-      <div class="field"><label class="field-label" for="model-apply-action">操作</label><select id="model-apply-action"><option value="apply" ${modelId ? '' : 'disabled'}>应用此供应商 API</option><option value="restore" ${modelId ? '' : 'selected'}>撤销助手配置，恢复原值</option></select></div>
-      <div class="field wide" id="model-apply-model-field"><label class="field-label" for="model-apply-model">目标软件使用的模型</label><select id="model-apply-model">${ids.map(id => `<option value="${escapeHtml(id)}" ${id === aiModelId(service) ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('')}</select><span class="hint">本次选择只影响目标软件，不改变资产 AI 辅助模型。</span></div>
-      </div><p id="model-apply-scope" class="small-note"></p><div class="quick-links"><button class="btn btn-primary" id="model-apply-preview">预览配置</button></div><div id="model-apply-preview-result" role="status"></div>`);
-    let generation = 0;
-    const invalidate = () => {
-      generation++;
-      const software = $('#model-apply-software').value;
-      $('#model-apply-model-field').style.display = $('#model-apply-action').value === 'restore' ? 'none' : '';
-      $('#model-apply-scope').textContent = `作用范围：本机当前用户的 ${software === 'codex' ? 'Codex' : 'Claude Code'} 配置，影响使用该配置的新会话。应用后请重新启动目标软件。`;
-      $('#model-apply-preview-result').innerHTML = '';
-    };
-    for (const selector of ['#model-apply-software', '#model-apply-action', '#model-apply-model']) $(selector).onchange = invalidate;
-    invalidate();
-    $('#model-apply-preview').onclick = async () => {
-      const previewButton = $('#model-apply-preview'), output = $('#model-apply-preview-result');
-      const values = { modelId, software: $('#model-apply-software').value, selectedModel: $('#model-apply-model').value, restore: $('#model-apply-action').value === 'restore' };
-      if (!values.restore && !modelId) return notice('请先保存供应商服务', true);
-      const current = ++generation; previewButton.disabled = true; output.textContent = '正在读取配置…';
-      try {
-        const result = await api('model-application', 'POST', { ...values, preview: true });
-        if (current !== generation || !output.isConnected) return;
-        output.innerHTML = `<p><strong>${escapeHtml(result.scope)}</strong></p><p>${escapeHtml(result.path)}</p><details class="preview-file"><summary>当前配置</summary><pre>${escapeHtml(result.before)}</pre></details><details class="preview-file" open><summary>${result.restore ? '恢复后的配置' : '应用后的配置'}</summary><pre>${escapeHtml(result.after)}</pre></details>${(result.legacyRestorations || []).map(item => `<details class="preview-file"><summary>同时撤销旧版项目 API 覆盖：${escapeHtml(item.path)}</summary><p>恢复前：</p><pre>${escapeHtml(item.before)}</pre><p>恢复后：</p><pre>${escapeHtml(item.after)}</pre></details>`).join('')}<p class="small-note">密钥由本机私有存储提供。环境变量、其他手动项目覆盖和组织策略可能覆盖用户级配置。撤销只恢复助手管理的字段。</p><div class="quick-links"><button class="btn btn-primary" id="model-apply-confirm">${result.restore ? '确认撤销' : '确认应用到用户级'}</button></div>`;
-        const confirm = $('#model-apply-confirm');
-        confirm.onclick = async () => {
-          confirm.disabled = true;
-          try { await api('model-application', 'POST', { ...values, token: result.token }); if (current === generation && output.isConnected) output.textContent = `${result.restore ? '已恢复原用户级 API 配置' : '已应用用户级 API'}：${result.path}。请重新启动目标软件。`; }
-          catch (error) { if (current === generation) { output.textContent = error.message; notice(error.message, true); } }
-        };
-      } catch (error) { if (current === generation) output.textContent = error.message; }
-      finally { previewButton.disabled = false; }
-    };
-  };
+  $('#model-apply').onclick = () => openModelApplication({ draft, api, notice, showModal, escapeHtml, button: $('#model-apply') });
 }

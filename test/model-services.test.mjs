@@ -64,13 +64,17 @@ test('模型服务端到端：草稿测试、版本密钥隔离、AI 复用、�
   const project = await request('project', { asset: { title: 'API 项目', directory: projectDir }, message: '登记项目' });
   const gateway = await request('model', { asset: { ...multi, apiKey: '', claudeBaseUrl: baseUrl, codexBaseUrl: `${baseUrl}/v1` }, message: '登记目标端点' });
   for (const software of ['claude', 'codex']) {
-    const body = { modelId: gateway.id, software, selectedModel: 'test' };
+    const body = { modelId: gateway.id, software, selectedModel: 'test', modelMapping: { claude: { opus: 'other' }, models: [{ id: 'test', label: '首选' }, { id: 'other' }] } };
     const preview = await request('model-application', { ...body, preview: true });
     assert.ok(!JSON.stringify(preview).includes('integration-private-key'));
     assert.equal(fs.existsSync(preview.path), false);
     assert.match(preview.scope, /当前用户/);
     await request('model-application', { ...body, token: preview.token }); assert.equal(fs.existsSync(preview.path), true);
     assert.match(fs.readFileSync(preview.path, 'utf8'), /test/);
+    const state = await request('model-application-state?modelId=' + gateway.id);
+    assert.equal(state[software].modelMapping.claude.opus, 'other');
+    assert.equal(state[software].selectedModel, 'test');
+    if (software === 'codex') assert.equal(JSON.parse(fs.readFileSync(preview.additionalFiles[0].path)).models[0].display_name, '首选 (test)');
     assert.equal((await request('model/' + gateway.id)).aiModel, 'other');
     assert.equal(fs.existsSync(path.join(projectDir, '.claude', 'settings.local.json')), false);
     const restore = { software, projectId: project.id, restore: true };

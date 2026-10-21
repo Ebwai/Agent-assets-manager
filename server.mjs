@@ -1014,13 +1014,14 @@ async function handleApi(req, url) {
     const text = await requestModel(draft, key, '请简短回答。', '请回复 OK，验证连接。', 256);
     return { ok: true, text: text.slice(0, 500) };
   }
+  if (segments[0] === 'model-application-state' && method === 'GET') return modelApplication.state(safeId(url.searchParams.get('modelId')));
   if (segments[0] === 'model-application' && method === 'POST') {
     const restore = body.restore === true;
     const model = restore ? null : get('model', safeId(body.modelId));
     if (!restore && !model) throw new Error('模型配置不存在');
     const legacyProjectDirectories = Object.values(readJson(pathsFile, {}));
     const key = model ? readJson(keysFile, {})[model.id] : '';
-    const input = { model, key, software: body.software, selectedModel: body.selectedModel, legacyProjectDirectories, restore };
+    const input = { model, key, software: body.software, selectedModel: body.selectedModel, modelMapping: body.modelMapping, legacyProjectDirectories, restore };
     return body.preview === true ? modelApplication.preview(input) : modelApplication.apply(input, body.token);
   }
   if (segments[0] === 'rule-validate' && method === 'POST') return {ok:true,markdown:renderRule(body.asset)};

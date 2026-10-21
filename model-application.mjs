@@ -5,6 +5,8 @@ import crypto from 'node:crypto';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { apiUrl, modelApiRoot, validateModel } from './model-protocols.mjs';
 import { modelProtocol, aiModelId, serviceModelIds } from './public/model-protocols.js';
+import { normalizeApplicationMapping, claudeModelSlots } from './public/model-mapping.js';
+import { codexModelCatalog } from './model-catalog.mjs';
 
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -74,7 +76,7 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
   const helperFile = path.join(privateDir, 'model-auth.mjs');
   const helperContent = `import fs from 'node:fs';\ntry {\n  const key = JSON.parse(fs.readFileSync(${JSON.stringify(keysFile)}, 'utf8'))[process.argv[2]];\n  if (typeof key !== 'string' || !key || /[\\r\\n]/.test(key)) throw Error();\n  process.stdout.write(key);\n} catch { process.stderr.write('模型密钥不存在，请在资产管理助手中重新配置。\\n'); process.exitCode = 1; }\n`;
 
-  function plan({ model, key, software, selectedModel, legacyProjectDirectories = [], restore = false }) {
+  function plan({ model, key, software, selectedModel, modelMapping, legacyProjectDirectories = [], restore = false }) {
     if (!['claude', 'codex'].includes(software)) throw new Error('目标软件无效');
     const file = software === 'claude' ? path.join(claudeHome, 'settings.json') : path.join(codexHome, 'config.toml');
     assertOrdinaryPath(file);
@@ -113,15 +115,25 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
         delete records[legacyId];
       }
     }
-    let content, nextRecord;
+    const additionalFiles = [];
+    const catalogFile = path.join(privateDir, 'model-catalogs', recordId + '.json');
+    const oldCatalog = previous?.catalog;
+    if (oldCatalog) {
+      assertOrdinaryPath(catalogFile);
+      if (oldCatalog.file !== catalogFile || hash(read(catalogFile) || '') !== oldCatalog.writtenHash) throw new Error('助手管理的模型目录已被外部修改，已停止覆盖和撤销');
+    }
+    let content, nextRecord, mapping;
+    const warnings = [];
     if (restore) {
       if (!previous) throw new Error('此位置没有可撤销的助手 API 配置');
       for (const owned of previous.fields) setField(document, owned.path, owned.before);
       content = before !== null && hash(before) === previous.writtenHash ? previous.restoreContent : serialize(document);
       delete records[recordId];
+      if (oldCatalog) additionalFiles.push({ file: catalogFile, before: read(catalogFile), content: oldCatalog.restoreContent });
     } else {
       if (!model?.id) throw new Error('请先保存模型服务');
       const target = targetModel(model, software, selectedModel);
+      mapping = normalizeApplicationMapping(model, target.model, modelMapping);
       if (model.authMode !== 'none' && !key) throw new Error('请先保存 API Key');
       const rootUrl = modelApiRoot(target, target.protocol);
       const updates = software === 'claude' ? [
@@ -136,6 +148,30 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
         { path: ['model_provider'], entry: { exists: true, value: 'asset_manager' } },
         { path: ['model_providers', 'asset_manager'], entry: { exists: true, value: { name: model.title, base_url: rootUrl, wire_api: 'responses', requires_openai_auth: false, supports_websockets: false, ...(model.authMode === 'none' ? {} : { auth: { command: process.execPath, args: [helperFile, model.id] } }) } } }
       ];
+      if (software === 'claude') {
+        for (const [slot, , variable] of claudeModelSlots) updates.push({ path: ['env', variable], entry: { exists: true, value: mapping.claude[slot] } });
+        updates.push(
+          { path: ['env', 'ANTHROPIC_SMALL_FAST_MODEL'], entry: { exists: true, value: mapping.claude.haiku } },
+          { path: ['env', 'ANTHROPIC_CUSTOM_MODEL_OPTION'], entry: { exists: true, value: target.model } },
+          { path: ['env', 'ANTHROPIC_CUSTOM_MODEL_OPTION_NAME'], entry: { exists: true, value: target.model } },
+          { path: ['modelPicker'], entry: { exists: true, value: { replaceBuiltInOptions: true, options: mapping.models.map(row => ({ model: row.id, label: row.label === row.id ? row.id : row.label + ' (' + row.id + ')' })) } } }
+        );
+        for (const [source, id] of Object.entries(mapping.overrides)) updates.push({ path: ['modelOverrides', source], entry: { exists: true, value: id } });
+        warnings.push('Claude Code 完整自定义模型列表需要 2.1.242 或以上；旧版本使用家族别名映射和单个自定义选项。明确指定其他版本的 Agent 定义仍可能覆盖子任务默认模型。');
+        if (document.availableModels) warnings.push('现有 availableModels 限制已保留，可能限制列表中的模型；组织策略同样优先。');
+      } else {
+        if (!mapping.models.some(row => row.id === mapping.reviewModel)) throw new Error('代码审查模型必须包含在目标软件列表中');
+        assertOrdinaryPath(catalogFile);
+        const catalogBefore = read(catalogFile), catalogContent = codexModelCatalog(mapping);
+        additionalFiles.push({ file: catalogFile, before: catalogBefore, content: catalogContent });
+        updates.push(
+          { path: ['model_catalog_json'], entry: { exists: true, value: catalogFile } },
+          { path: ['review_model'], entry: { exists: true, value: mapping.reviewModel } },
+          { path: ['model_reasoning_effort'], entry: mapping.models.find(row => row.id === target.model).reasoning === 'none' ? { exists: false } : { exists: true, value: 'medium' } }
+        );
+        warnings.push('模型目录在客户端启动时加载。请完全退出并重新打开 Codex／桌面端，新建本地聊天并选择供应商模型；旧聊天保存的 GPT 模型不会自动改写。此配置不改变 ChatGPT 云端聊天的模型列表。');
+        if (document.profile) warnings.push('当前启用了配置 profile，它的模型或目录设置可能覆盖本次用户级默认值，请核对实际生效配置。');
+      }
       // Recover the baseline before applying again, retaining unrelated user changes.
       if (previous) for (const owned of previous.fields) setField(document, owned.path, owned.before);
       const baseline = !previous ? before : before !== null && hash(before) === previous.writtenHash ? previous.restoreContent : serialize(document);
@@ -143,10 +179,12 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
       for (const update of updates) setField(document, update.path, update.entry);
       content = serialize(document);
       nextRecord = { modelId: model.id, selectedModel: target.model, path: file, software, fields, restoreContent: baseline, writtenHash: hash(content) };
+      nextRecord.modelMapping = mapping;
+      if (software === 'codex') nextRecord.catalog = { file: catalogFile, restoreContent: oldCatalog ? oldCatalog.restoreContent : read(catalogFile), writtenHash: hash(additionalFiles[0].content) };
       records[recordId] = nextRecord;
     }
-    const token = hash(JSON.stringify({ file, before, content, recordsText, model, selectedModel, legacyFiles, keyHash: hash(key || ''), restore, helper: read(helperFile) }));
-    return { file, before, content, token, records, restore, helperContent, recordsText, software, legacyFiles, scope: `本机当前用户的 ${software === 'claude' ? 'Claude Code' : 'Codex'} 配置（影响使用此配置的新会话）` };
+    const token = hash(JSON.stringify({ file, before, content, recordsText, model, selectedModel, modelMapping, legacyFiles, additionalFiles, keyHash: hash(key || ''), restore, helper: read(helperFile) }));
+    return { file, before, content, token, records, restore, helperContent, recordsText, software, legacyFiles, additionalFiles, mapping, warnings, scope: `本机当前用户的 ${software === 'claude' ? 'Claude Code' : 'Codex'} 配置（影响使用此配置的新会话）` };
   }
 
   function preview(input) {
@@ -172,7 +210,7 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
       return value;
     };
     const redact = (text, empty) => text === null ? empty : result.software === 'claude' ? JSON.stringify(redactValue(parse(text)), null, 2) + '\n' : stringifyToml(redactValue(parse(text)));
-    return { path: result.file, scope: result.scope, before: redact(result.before, '（文件不存在）'), after: redact(result.content, '（撤销后删除此文件）'), token: result.token, restore: result.restore, legacyRestorations: result.legacyFiles.map(item => ({ path: item.file, before: redact(item.before, '（文件不存在）'), after: redact(item.content, '（撤销后删除此文件）') })) };
+    return { path: result.file, scope: result.scope, before: redact(result.before, '（文件不存在）'), after: redact(result.content, '（撤销后删除此文件）'), token: result.token, restore: result.restore, modelMapping: result.mapping, warnings: result.warnings, additionalFiles: result.additionalFiles.map(item => ({ path: item.file, before: item.before === null ? '（文件不存在）' : JSON.stringify(redactValue(JSON.parse(item.before)), null, 2), after: item.content === null ? '（撤销后删除此文件）' : JSON.stringify(redactValue(JSON.parse(item.content)), null, 2) })), legacyRestorations: result.legacyFiles.map(item => ({ path: item.file, before: redact(item.before, '（文件不存在）'), after: redact(item.content, '（撤销后删除此文件）') })) };
   }
 
   function atomicWrite(file, content) {
@@ -189,10 +227,12 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
     const oldHelper = read(helperFile);
     try {
       if (!result.restore) atomicWrite(helperFile, helperContent);
+      for (const extra of result.additionalFiles) atomicWrite(extra.file, extra.content);
       for (const legacy of result.legacyFiles) atomicWrite(legacy.file, legacy.content);
       atomicWrite(result.file, result.content);
       atomicWrite(recordFile, JSON.stringify(result.records, null, 2) + '\n');
     } catch (error) {
+      for (const extra of result.additionalFiles) atomicWrite(extra.file, extra.before);
       for (const legacy of result.legacyFiles) atomicWrite(legacy.file, legacy.before);
       atomicWrite(result.file, result.before);
       atomicWrite(recordFile, result.recordsText);
@@ -201,5 +241,12 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
     }
     return { ok: true, path: result.file, scope: result.scope, restored: result.restore };
   }
-  return { preview, apply };
+  function state(modelId) {
+    const records = JSON.parse(read(recordFile) || '{}');
+    return Object.fromEntries([['claude', path.join(claudeHome, 'settings.json')], ['codex', path.join(codexHome, 'config.toml')]].map(([software, file]) => {
+      const record = records[hash(path.resolve(file))];
+      return [software, record?.modelId === modelId ? { selectedModel: record.selectedModel, modelMapping: record.modelMapping } : null];
+    }));
+  }
+  return { preview, apply, state };
 }
