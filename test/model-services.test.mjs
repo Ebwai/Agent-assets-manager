@@ -40,7 +40,8 @@ test('模型服务端到端：草稿测试、版本密钥隔离、AI 复用、�
   const baseUrl = `http://127.0.0.1:${upstream.address().port}`;
   const draft = { title: '新模型', model: 'test', protocol, baseUrl, apiKey: 'integration-private-key' };
   assert.equal((await request('model-test', { asset: draft })).text, 'OK');
-  assert.equal((await request('bootstrap')).assets.model.length, 0);
+  const initialModels = (await request('bootstrap')).assets.model;
+  assert.equal(initialModels.length, 1); assert.equal(initialModels[0].id, 'a120b070-2026-4022-8000-000000000001'); assert.equal(initialModels[0].hasKey, false);
   const model = await request('model', { asset: draft, message: '保存多协议模型' });
   assert.equal(model.protocol, protocol); assert.equal(model.apiKey, undefined); assert.equal(model.hasKey, true);
   const definition = fs.readFileSync(path.join(data, 'repo', 'assets', 'model', `${model.id}.json`), 'utf8');

@@ -1,4 +1,10 @@
-# Agent 资产管理助手
+# AI2Robot · Agent 资产管理助手（公司定制版）
+
+本分支 `AI2Robot` 基于主分支维护公司特别定制版本。首次启动会在「模型服务」加入 AI2RobCoWork：地址 `https://ai2robcowork.site/openai/v1`，协议 OpenAI Responses，默认模型 `gpt-6.1-sol`。**不内置 API Key**，请由使用者在本机填写。
+
+默认模型为用户指定的 `gpt-6.1-sol`，具体可用模型以供应商权限为准；可填写 Key 后获取供应商模型列表，再选择有权限的模型。Codex 应用继续使用主分支的凭据辅助程序和模型目录，不会自动执行示例中的用户配置覆盖命令。首次预置不自动切换 Codex 或 Claude Code。
+
+已有同地址服务会保留模型、密钥与资产引用；安装标记只在本机保存，后续编辑或删除预置项不会在重启时重建。资产库有未提交修改时暂缓新增预置项，待干净后重启。资产数据目录沿用标准版，可通过 `ASSET_DATA_DIR` 指定独立目录。本分支改动不自动合并回 `main`。
 
 本地运行的网页应用。资产库位于用户目录下的 `Agent_assets_manager/repo`，每次保存资产都会创建 Git 提交。首次启动会从旧版项目内的 `.asset-data` 迁移资产库及其完整历史。模型密钥、本机项目路径、MCP 环境变量和本机选用的历史版本保存在 `Agent_assets_manager/private`，不参与 Git 同步。
 

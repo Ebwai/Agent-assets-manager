@@ -1,5 +1,6 @@
 ---
 paths:
+  - "company-preset.mjs"
   - "server.mjs"
   - "skill-visualization.mjs"
   - "public/skill-*.js"
@@ -56,6 +57,8 @@ R13：modelMapping 随 selectedModel 进入预览／确认输入，只引用供�
 证明分支与并行汇合、规则范围、资源、循环、保留章节不丢失；布局变更不改正文；缺省字段可通过；提示忽略可持久化；服务端拒绝未同步文字；模型失败／迟到响应不会创建版本或覆盖草稿；历史与模型配置隔离仍成立。
 
 ## 多协议模型服务与软件 API 配置
+
+AI2Robot 分支初始化：installCompanyPreset 读取本机安装标记，优先匹配已有服务 ID 或同地址服务；仅在未安装、无匹配服务且资产库干净时校验并创建无密钥定义、仅提交该资产文件。预置使用固定 ID 和时间戳以避免跨电脑重复及无意义同步冲突；标记在成功保存或发现已有服务后写入 private，用户后续修改和删除不触发重置。模板不包含 apiKey，初始化不调用模型、不改 Codex/Claude 配置。test/company-preset.test.mjs 覆盖一次性安装、密钥留空、已有服务优先及脏工作区暂缓；test/model-services.test.mjs 核对真实服务启动后预置资产可见且 hasKey=false。
 
 ### 模块概览
 

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { installCompanyPreset } from './company-preset.mjs';
 import { validateModel, requestModel } from './model-protocols.mjs';
 import { normalizeModelService } from './public/model-protocols.js';
 import { discoverModels } from './model-discovery.mjs';
@@ -89,6 +90,16 @@ function ensureData() {
     git(['commit', '-m', '初始化资产仓库']);
   }
   migrateLocalSettings();
+  installCompanyPreset({ privateDir, services: rawList('model'), canSave: () => !git(['status', '--porcelain']).trim() && !fs.existsSync(path.join(repo, '.git', 'MERGE_HEAD')), save: preset => {
+    const asset = { ...preset, type: 'model', createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z' };
+    validateAsset('model', asset);
+    const file = assetPath('model', safeId(asset.id));
+    writeJson(file, asset);
+    const relative = path.relative(repo, file).replaceAll('\\', '/');
+    git(['add', relative]);
+    git(['commit', '--only', '-m', '初始化 AI2Robot 公司预置服务（密钥留空）', '--', relative]);
+    return asset;
+  } });
 }
 function readJson(file, fallback = null) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) {
