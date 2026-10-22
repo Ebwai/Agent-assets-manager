@@ -110,3 +110,8 @@ R13 验收：55 项测试通过。RUN_NATIVE_MODEL_TESTS=1 显式启用已安装
 服务资产新增可选 `modelCapabilities: [{ id, contextWindow, reasoning }]`；共享规范化函数校验 ID 唯一且属于列表，窗口 4096–2000000，reasoning 为 none/standard。定义随资产版本同步，密钥仍私有。模型编辑页按 ID 维护、发现合并保留能力、删除 ID 清除对应能力；旧记录优先从本机 Codex 应用历史带回。未保存前仍兼容旧应用行；存在通用字段时，服务端忽略应用输入中的能力，缺失行使用默认值。
 
 Codex 复用目录投影。Claude 按所有 picker、别名及版本映射目标的最小窗口写 `env.CLAUDE_CODE_MAX_CONTEXT_TOKENS`，家族及默认自定义选项写 `_SUPPORTED_CAPABILITIES=effort` 或空值；不关闭压缩、不伪造模型 ID。预览提示识别模型/[1m]/旧客户端与任意 picker ID 的限制。所有新增字段沿用叶子管理、预览哈希、首次原值撤销。实现：public/model-protocols.js、model-config.js、model-mapping.js、model-application.js、model-application.mjs；验证：test/model-mapping.test.mjs。
+
+
+### AI2Robot 订阅上下文快照（2026-10-22）
+
+公司模板包含七个供应商已知模型及 `modelCapabilities`；gpt-6.1-sol 的 contextWindow=500000，其余六个=272000，reasoning=standard。依据为本机官方 Codex models_cache.json 的 fetched_at=2026-10-22T06:26:18.886539200Z、client_version=0.163.0，仅采纳模型窗口元数据，不复制账号或认证信息。contextWindow 代表完整窗口，经 model-catalog.mjs 投影到 context_window，保留 95% 有效比例；不写 max_output_tokens，不将 API 文档中的 1050000/128000 混作订阅默认值。单次初始化和已有服务保留语义不变。test/company-preset.test.mjs 核对七模型窗口、规范化、目录投影及用户可改。

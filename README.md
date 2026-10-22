@@ -2,7 +2,9 @@
 
 本分支 `AI2Robot` 基于主分支维护公司特别定制版本。首次启动会在「模型服务」加入 AI2RobCoWork：地址 `https://ai2robcowork.site/openai/v1`，协议 OpenAI Responses，默认模型 `gpt-6.1-sol`。**不内置 API Key**，请由使用者在本机填写。
 
-默认模型为用户指定的 `gpt-6.1-sol`，具体可用模型以供应商权限为准；可填写 Key 后获取供应商模型列表，再选择有权限的模型。Codex 应用继续使用主分支的凭据辅助程序和模型目录，不会自动执行示例中的用户配置覆盖命令。首次预置不自动切换 Codex 或 Claude Code。
+默认模型为用户指定的 `gpt-6.1-sol`，具体可用模型以供应商权限为准；可填写 Key 后获取供应商模型列表，再选择有权限的模型。Codex 应用继续使用主分支的凭据辅助程序和模型目录，不会自动执行示例中的用户配置覆盖命令。首次预置不自动切换 Codex 或 Claude Code。已有服务仍按原规则保留，不会因模板更新自动重置其能力；需要时在模型配置中调整。
+
+预置七个模型及完整上下文窗口：`gpt-6.1-sol` 为 **500000** tokens；`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 均为 **272000** tokens。数值来自本机 Codex 0.163.0 于 2026-10-22 获取的官方订阅模型目录快照；目录保留 95% 有效窗口比例，6.1 Sol 因此可能显示 475000。它们不是单次输出限制，也不等于 API 标称上限。官方 [6.1 Sol 模型文档](https://developers.openai.com/api/docs/models/gpt-6.1-sol) 分别列出 1050000 总上下文与 128000 最大输出；[Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference) 将 model_context_window 定义为活动模型的上下文容量。订阅目录可能随后变化，中转服务也可能有自身限制；可编辑后保存并预览应用。推理能力默认启用当前应用支持的 low / medium / high。
 
 已有同地址服务会保留模型、密钥与资产引用；安装标记只在本机保存，后续编辑或删除预置项不会在重启时重建。资产库有未提交修改时暂缓新增预置项，待干净后重启。资产数据目录沿用标准版，可通过 `ASSET_DATA_DIR` 指定独立目录。本分支改动不自动合并回 `main`。
 
