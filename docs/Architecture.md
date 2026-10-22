@@ -53,6 +53,8 @@ flowchart LR
 
 ### R11 实现边界
 
+跨平台启动入口：macOS command 与 Linux shell 仅负责定位项目和发现 Node.js；scripts/launch.mjs 负责依赖检查、助手子进程生命周期、就绪探测和浏览器打开，以及 Linux 桌面快捷方式生成。启动器不拥有模型或资产配置写入，资产初始化仍由服务端负责。Windows cmd 保持现有行为。
+
 协议适配与软件配置独立于画板转换。首期直连 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses、Gemini generateContent；外部网关提供兼容端点时可覆盖目标软件地址与模型名。应用不内置完整转换网关，不将文本连通等同于 Agent 工具调用兼容。
 
 Claude Code 与 Codex 均使用用户级配置。两者均先预览、后确认写入；本助手不在开发过程中修改当前运行的全局配置。目标配置通过凭据辅助程序读取本机 Key，不嵌入 Key。模型 API 配置生效与撤销仅管理生成字段，确认后覆盖这些字段的当前值，保留非受管字段；只有预览之后的变化要求重新预览。供应商模型列表发现模块只读取远端目录，不拥有资产保存；供应商持有列表及 AI 辅助模型，外部软件应用持有本次模型选择。旧项目覆盖由目标配置模块在预览确认后恢复。

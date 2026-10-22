@@ -1,5 +1,6 @@
 ---
 paths:
+  - "scripts/launch.mjs"
   - "server.mjs"
   - "skill-visualization.mjs"
   - "public/skill-*.js"
@@ -56,6 +57,8 @@ R13：modelMapping 随 selectedModel 进入预览／确认输入，只引用供�
 证明分支与并行汇合、规则范围、资源、循环、保留章节不丢失；布局变更不改正文；缺省字段可通过；提示忽略可持久化；服务端拒绝未同步文字；模型失败／迟到响应不会创建版本或覆盖草稿；历史与模型配置隔离仍成立。
 
 ## 多协议模型服务与软件 API 配置
+
+跨平台启动：scripts/launch.mjs 从脚本自身定位项目，检查 Node 版本、Git 和 package.json 所列依赖；缺失时执行 npm install，端口可用后启动 server.mjs。仅在 HTTP 返回助手页面后打开浏览器，失败提供 URL；信号转发到本次子进程。Linux 快捷方式 Exec 参数按桌面文件规则转义，不拼接 shell 命令；目标桌面目录优先通过 xdg-user-dir 获取，系统信任仍由用户确认。macOS／Ubuntu 原生图形环境在本机 Windows 环境无法直接验收，脚本语法及共享启动逻辑需独立验证。
 
 ### 模块概览
 
