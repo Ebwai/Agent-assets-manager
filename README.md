@@ -12,6 +12,10 @@
 
 需要 Node.js 20+ 和 Git。Windows 可双击 `启动助手.cmd`（首次运行会安装依赖）；也可以先运行 `npm install`，再运行 `npm start`，打开终端显示的 `http://127.0.0.1:8073`。可用 `PORT` 环境变量改端口。
 
+macOS 可双击 `启动助手.command`。Ubuntu 首次在项目目录运行 `bash 安装桌面快捷方式.sh`，之后双击桌面上的「Agent 资产管理助手」即可；若桌面提示未信任，请右键选择「允许启动」。Linux 文件管理器不一定默认允许双击执行 `.sh`，因此推荐使用桌面快捷方式。也可以直接运行 `bash 启动助手.sh`。
+
+上述启动器会检查 Node.js 20+ 和 Git，首次缺少依赖时运行 npm 安装；服务就绪后自动打开浏览器。终端需要保持开启，按 Ctrl+C 停止。macOS 从 ZIP 解压若提示没有执行权限，请在项目目录先运行 `chmod +x 启动助手.command 启动助手.sh`；Git 克隆会保留可执行权限。快捷方式使用项目的绝对路径，移动项目目录后需重新安装快捷方式。Node.js／Git 仍需预先安装；支持常见 Homebrew 路径及 `~/.nvm` 安装的 Node.js。
+
 ## Plugins
 
 左侧「Plugins」管理服务于同一用途的完整包，可新建本地包、导入本地目录，或连接自己 / 他人的 GitHub 仓库。包可包含 Skills、Rules、提示词、Agent、Hooks、套件、模型定义等资产，也可包含其他脚本、配置与二进制文件。脚本不会自动执行。每个包有独立 Git 仓库，位于 `Agent_assets_manager/plugins/<ID>`，与整个资产库的远程同步分开；包名称、说明与仓库关联记录保存在本机的 Plugins 索引中。

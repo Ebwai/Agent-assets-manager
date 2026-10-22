@@ -1,6 +1,8 @@
 ---
 paths:
   - "company-preset.mjs"
+
+  - "scripts/launch.mjs"
   - "server.mjs"
   - "skill-visualization.mjs"
   - "public/skill-*.js"
@@ -60,6 +62,8 @@ R13：modelMapping 随 selectedModel 进入预览／确认输入，只引用供�
 
 AI2Robot 分支初始化：installCompanyPreset 读取本机安装标记，优先匹配已有服务 ID 或同地址服务；仅在未安装、无匹配服务且资产库干净时校验并创建无密钥定义、仅提交该资产文件。预置使用固定 ID 和时间戳以避免跨电脑重复及无意义同步冲突；标记在成功保存或发现已有服务后写入 private，用户后续修改和删除不触发重置。模板不包含 apiKey，初始化不调用模型、不改 Codex/Claude 配置。test/company-preset.test.mjs 覆盖一次性安装、密钥留空、已有服务优先及脏工作区暂缓；test/model-services.test.mjs 核对真实服务启动后预置资产可见且 hasKey=false。
 
+跨平台启动：scripts/launch.mjs 从脚本自身定位项目，检查 Node 版本、Git 和 package.json 所列依赖；缺失时执行 npm install，端口可用后启动 server.mjs。仅在 HTTP 返回助手页面后打开浏览器，失败提供 URL；信号转发到本次子进程。Linux 快捷方式 Exec 参数按桌面文件规则转义，不拼接 shell 命令；目标桌面目录优先通过 xdg-user-dir 获取，系统信任仍由用户确认。macOS／Ubuntu 原生图形环境在本机 Windows 环境无法直接验收，脚本语法及共享启动逻辑需独立验证。
+
 ### 模块概览
 
 关联 PRD：模型服务配置、项目配置生效（R11）。实现锚点：`model-protocols.mjs`、`model-application.mjs`、`public/model-protocols.js`、`public/app.js` 及 `server.mjs`；对应验证位于 `test/model-*.test.mjs`。
@@ -99,3 +103,10 @@ R12 验收：全套 50 项测试通过，新增供应商规范化、模型目录
 R13 验收：55 项测试通过。RUN_NATIVE_MODEL_TESTS=1 显式启用已安装客户端的验收，Windows 通过 CLAUDE_TEST_BINARY 指定原生 exe。原生 Codex model/list 返回配置列表，实际请求及 Claude 家族别名请求由本地模拟接口捕获，验证真实 ID 一致；不把模拟上游记录为 DeepSeek 远端兼容认证。真实既有 Responses 服务另以隔离目录完成 gpt-6-luna 会话。完整 Claude picker 的最低版本依据官方文档，本机旧版只验收别名映射。桌面原生 UI 未直接操作，目录 backend 验收和 UI 版本限制分别记录。
 
 真实服务验收使用独立 CODEX_HOME：生成配置通过 Codex 严格解析，gpt-6.1-sol 会话完整结束并返回预期文本；同服务的 Responses 函数调用及结果回传通过。该服务模型目录带非标准封装，Codex 目录刷新仍会报告解码／超时告警；指定模型实际推理成功。本机 shell 补充测试被 Codex 执行策略拒绝，此环境限制单独记录，不计为文件读取成功。
+
+
+### 模型通用能力（2026-10-22）
+
+服务资产新增可选 `modelCapabilities: [{ id, contextWindow, reasoning }]`；共享规范化函数校验 ID 唯一且属于列表，窗口 4096–2000000，reasoning 为 none/standard。定义随资产版本同步，密钥仍私有。模型编辑页按 ID 维护、发现合并保留能力、删除 ID 清除对应能力；旧记录优先从本机 Codex 应用历史带回。未保存前仍兼容旧应用行；存在通用字段时，服务端忽略应用输入中的能力，缺失行使用默认值。
+
+Codex 复用目录投影。Claude 按所有 picker、别名及版本映射目标的最小窗口写 `env.CLAUDE_CODE_MAX_CONTEXT_TOKENS`，家族及默认自定义选项写 `_SUPPORTED_CAPABILITIES=effort` 或空值；不关闭压缩、不伪造模型 ID。预览提示识别模型/[1m]/旧客户端与任意 picker ID 的限制。所有新增字段沿用叶子管理、预览哈希、首次原值撤销。实现：public/model-protocols.js、model-config.js、model-mapping.js、model-application.js、model-application.mjs；验证：test/model-mapping.test.mjs。

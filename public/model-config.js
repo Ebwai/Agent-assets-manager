@@ -13,6 +13,7 @@ export function renderModelFields(d, field, escapeHtml) {
     <div class="field wide"><label class="field-label" for="api-key">API Key <span class="pill gray">本机私有</span></label><input id="api-key" type="password" value="" autocomplete="new-password" placeholder="${d.hasKey || d.apiKey ? '已有密钥；留空表示不修改' : '输入 API Key'}"><span class="hint">地址、协议和 Key 由此供应商的模型共享；Key 不进入 Git。</span></div>
     <div class="field wide"><label class="field-label" for="model-ids">供应商模型列表（每行一个模型 ID）</label><textarea id="model-ids" rows="6" placeholder="${escapeHtml(protocol.example)}">${escapeHtml(ids.join('\n'))}</textarea><div class="quick-links"><button type="button" class="btn" id="model-discover">从 API 获取模型列表</button></div><span class="hint">可以手工添加或删除；获取结果会合并到列表，不自动保存。</span><div id="model-discovery-result" role="status"></div></div>
     <div class="field wide"><label class="field-label" for="model-ai-model">资产 AI 辅助使用的模型</label><select id="model-ai-model"><option value="">请选择模型</option>${selected && !ids.includes(selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}（不在列表中，请重新选择）</option>` : ''}${aiOptions}</select><span class="hint">用于资产审查、改进及画板 AI；应用到 Claude Code / Codex 时会另外选择模型，不改变此设置。</span></div>
+    <div class="field wide"><label class="field-label">各模型能力</label><div id="model-capabilities"></div><span class="hint">上下文窗口是输入、历史与输出共享的总容量，1M 填 1000000。推理强度须由供应商支持；配置保存后供目标软件应用使用，不会扩大模型真实容量。</span></div>
     ${field('说明', 'description', d.description, { wide: true })}
     <details class="field wide"><summary>目标软件网关与兼容选项</summary><div class="form-grid" style="margin-top:12px">
       ${field('Claude Code 的 Messages 兼容地址（可选）', 'claudeBaseUrl', d.claudeBaseUrl, { wide: true, placeholder: '留空时使用兼容的主地址' })}
@@ -24,12 +25,35 @@ export function renderModelFields(d, field, escapeHtml) {
 
 export function bindModelFields({ draft, api, notice, render, showModal, escapeHtml }) {
   const $ = selector => document.querySelector(selector);
+  const refreshCapabilities = () => {
+    const rows = serviceModelIds(draft).map(id => ({ id, contextWindow: 32768, reasoning: 'none', ...draft.modelCapabilities?.find(row => row.id === id) }));
+    $('#model-capabilities').innerHTML = `<table class="model-mapping-table"><thead><tr><th>模型 ID</th><th>上下文窗口 tokens</th><th>多个推理强度</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${escapeHtml(row.id)}</td><td><input aria-label="${escapeHtml(row.id)} 上下文窗口" data-cap-context="${index}" type="number" min="4096" max="2000000" value="${row.contextWindow}"></td><td><select aria-label="${escapeHtml(row.id)} 推理强度" data-cap-reasoning="${index}"><option value="none" ${row.reasoning === 'none' ? 'selected' : ''}>关闭（不发送）</option><option value="standard" ${row.reasoning === 'standard' ? 'selected' : ''}>开启 low / medium / high</option></select></td></tr>`).join('')}</tbody></table>`;
+    const save = () => { draft.modelCapabilities = rows; };
+    // Explicitly persist the complete per-model definition on the next asset save.
+    save();
+    for (const input of document.querySelectorAll('[data-cap-context]')) input.oninput = () => { rows[Number(input.dataset.capContext)].contextWindow = Number(input.value); save(); };
+    for (const input of document.querySelectorAll('[data-cap-reasoning]')) input.onchange = () => { rows[Number(input.dataset.capReasoning)].reasoning = input.value; save(); };
+  };
+  const needsLegacyCapabilities = draft.modelCapabilities === undefined;
+  refreshCapabilities();
+  if (needsLegacyCapabilities && draft.id) {
+    const initial = JSON.stringify(draft.modelCapabilities), host = $('#model-capabilities');
+    api('model-application-state?modelId=' + encodeURIComponent(draft.id)).then(saved => {
+      if (!host.isConnected || JSON.stringify(draft.modelCapabilities) !== initial) return;
+      const old = saved.codex?.modelMapping?.models;
+      if (old?.length) {
+        draft.modelCapabilities = draft.modelCapabilities.map(row => { const previous = old.find(item => item.id === row.id); return previous ? { id: row.id, contextWindow: previous.contextWindow ?? 32768, reasoning: previous.reasoning ?? 'none' } : row; });
+        refreshCapabilities();
+      }
+    }).catch(error => notice('旧应用能力配置读取失败：' + error.message, true));
+  }
   $('#api-key').oninput = event => { draft.apiKey = event.target.value; };
   $('#model-protocol').onchange = event => {
     if (modelProtocols.some(item => item.baseUrl === draft.baseUrl) || !draft.baseUrl) draft.baseUrl = modelProtocols.find(item => item.id === event.target.value).baseUrl;
     draft.protocol = event.target.value; render();
   };
   const refreshChoices = () => {
+    refreshCapabilities();
     const ids = serviceModelIds(draft), selected = aiModelId(draft);
     $('#model-ai-model').innerHTML = '<option value="">请选择模型</option>' + (selected && !ids.includes(selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}（不在列表中，请重新选择）</option>` : '') + ids.map(id => `<option value="${escapeHtml(id)}" ${id === selected ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('');
   };
