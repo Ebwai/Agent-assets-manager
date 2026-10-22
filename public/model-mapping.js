@@ -1,4 +1,4 @@
-import { serviceModelIds } from './model-protocols.js';
+import { serviceModelIds, normalizeModelCapability } from './model-protocols.js';
 
 export const claudeModelSlots = [
   ['sonnet', 'Sonnet（日常）', 'ANTHROPIC_DEFAULT_SONNET_MODEL'],
@@ -22,9 +22,8 @@ export function normalizeApplicationMapping(service, selectedModel, input = {}) 
     if (!row || typeof row !== 'object') throw new Error('模型列表行无效');
     const id = requireId(row.id), label = row.label === undefined ? id : row.label;
     if (typeof label !== 'string' || !label.trim() || label.length > 200 || /[\r\n\t]/.test(label)) throw new Error('模型显示名称需为 1–200 个字符');
-    const contextWindow = row.contextWindow ?? 32768, reasoning = row.reasoning ?? 'none';
-    if (!Number.isInteger(contextWindow) || contextWindow < 4096 || contextWindow > 2000000) throw new Error('上下文窗口需为 4096–2000000 的整数');
-    if (!['none', 'standard'].includes(reasoning)) throw new Error('推理能力配置无效');
+    // Saved model capabilities own these values; legacy application rows are fallback only.
+    const { contextWindow, reasoning } = normalizeModelCapability(service.modelCapabilities !== undefined ? service.modelCapabilities.find(item => item.id === id) : row);
     return { id, label: label.trim(), contextWindow, reasoning };
   });
   if (new Set(models.map(row => row.id)).size !== models.length) throw new Error('目标软件模型列表不能重复');

@@ -9,8 +9,37 @@ import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { normalizeApplicationMapping } from '../public/model-mapping.js';
 import { codexModelCatalog } from '../model-catalog.mjs';
 import { createModelApplication } from '../model-application.mjs';
+import { normalizeModelService } from '../public/model-protocols.js';
 
 const service = { id: 'supplier', title: 'DeepSeek', protocol: 'openai-responses', baseUrl: 'https://example.com/v1', claudeBaseUrl: 'https://example.com', model: 'deepseek-flash', aiModel: 'deepseek-flash', models: ['deepseek-flash', 'deepseek-v4-pro'] };
+
+test('模型资产能力优先于应用缓存，两个客户端投影并可撤销', t => {
+  const { app, codexHome, claudeHome } = setup(t);
+  const model = normalizeModelService({ ...service, modelCapabilities: [{ id: 'deepseek-flash', contextWindow: 1000000, reasoning: 'standard' }, { id: 'deepseek-v4-pro', contextWindow: 65536, reasoning: 'none' }] });
+  const stale = { models: [{ id: 'deepseek-flash', contextWindow: 4096, reasoning: 'none' }, { id: 'deepseek-v4-pro', contextWindow: 4096, reasoning: 'standard' }] };
+  for (const software of ['codex', 'claude']) {
+    const input = { model, key: 'private-key', software, modelMapping: stale };
+    const preview = app.preview(input);
+    assert.equal(preview.modelMapping.models[0].contextWindow, 1000000);
+    assert.equal(preview.modelMapping.models[0].reasoning, 'standard');
+    assert.equal(fs.existsSync(path.join(software === 'codex' ? codexHome : claudeHome, software === 'codex' ? 'config.toml' : 'settings.json')), false);
+    app.apply(input, preview.token);
+    if (software === 'codex') {
+      const config = parseToml(fs.readFileSync(path.join(codexHome, 'config.toml'), 'utf8'));
+      assert.equal(config.model_reasoning_effort, 'medium');
+      const catalog = JSON.parse(fs.readFileSync(config.model_catalog_json, 'utf8'));
+      assert.equal(catalog.models[0].context_window, 1000000);
+      assert.equal(catalog.models[1].supported_reasoning_levels.length, 0);
+    } else {
+      const config = JSON.parse(fs.readFileSync(path.join(claudeHome, 'settings.json')));
+      assert.equal(config.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '65536');
+      assert.equal(config.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES, 'effort');
+    }
+    const restore = { software, restore: true }; app.apply(restore, app.preview(restore).token);
+  }
+  for (const row of [{ id: 'unknown' }, { id: service.model, contextWindow: 5 }, { id: service.model, reasoning: 'ultra' }]) assert.throws(() => normalizeModelService({ ...service, modelCapabilities: [row] }));
+  assert.throws(() => normalizeModelService({ ...model, modelCapabilities: [...model.modelCapabilities, model.modelCapabilities[0]] }));
+});
 const mapping = { models: [{ id: 'deepseek-flash', label: '快速', contextWindow: 65536 }, { id: 'deepseek-v4-pro', label: '规划', contextWindow: 128000, reasoning: 'standard' }], claude: { opus: 'deepseek-v4-pro', subagent: 'deepseek-v4-pro' }, overrides: { 'claude-sonnet-4-6': 'deepseek-flash' } };
 
 function setup(t) {

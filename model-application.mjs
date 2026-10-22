@@ -155,6 +155,15 @@ export function createModelApplication({ privateDir, keysFile, codexHome = proce
         { path: ['model_providers', 'asset_manager'], entry: { exists: true, value: { name: model.title, base_url: rootUrl, wire_api: 'responses', requires_openai_auth: false, supports_websockets: false, ...(model.authMode === 'none' ? {} : { auth: { command: process.execPath, args: [helperFile, model.id] } }) } } }
       ];
       if (software === 'claude') {
+        if (model.modelCapabilities !== undefined) {
+          const capabilities = id => model.modelCapabilities.find(row => row.id === id) || { contextWindow: 32768, reasoning: 'none' };
+          const usedIds = [...new Set([...mapping.models.map(row => row.id), ...Object.values(mapping.claude), ...Object.values(mapping.overrides)])];
+          const windows = usedIds.map(id => capabilities(id).contextWindow ?? 32768);
+          updates.push({ path: ['env', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS'], entry: { exists: true, value: String(Math.min(...windows)) } });
+          for (const [slot, , variable] of claudeModelSlots.filter(([slot]) => slot !== 'subagent')) updates.push({ path: ['env', variable + '_SUPPORTED_CAPABILITIES'], entry: { exists: true, value: capabilities(mapping.claude[slot]).reasoning === 'standard' ? 'effort' : '' } });
+          updates.push({ path: ['env', 'ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES'], entry: { exists: true, value: capabilities(target.model).reasoning === 'standard' ? 'effort' : '' } });
+          warnings.push('Claude Code 的上下文覆盖是进程级参数：本次采用所有映射模型中最小窗口，避免切换模型后超限；已识别的 Claude ID 或带 [1m] 的 ID 可能仍按客户端内置窗口处理。不会关闭自动压缩。推理能力投影到家族别名和默认自定义选项；完整 picker 中其他任意 ID 的能力仍取决于客户端识别，旧版可能忽略能力声明。');
+        }
         for (const [slot, , variable] of claudeModelSlots) updates.push({ path: ['env', variable], entry: { exists: true, value: mapping.claude[slot] } });
         updates.push(
           { path: ['env', 'ANTHROPIC_SMALL_FAST_MODEL'], entry: { exists: true, value: mapping.claude.haiku } },
