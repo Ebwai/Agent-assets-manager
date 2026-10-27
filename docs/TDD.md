@@ -2,6 +2,9 @@
 paths:
   - "scripts/launch.mjs"
   - "server.mjs"
+  - "public/app.js"
+  - "public/updates.css"
+  - "test/deployment-incremental.test.mjs"
   - "skill-visualization.mjs"
   - "public/skill-*.js"
   - "test/skill-*.mjs"
@@ -9,6 +12,28 @@ paths:
   - "public/model-*.js"
   - "test/model-*.mjs"
 ---
+
+## 一键生效增量维护
+
+### 模块概览
+
+沿用浏览器交互、本地服务规划与项目生效记录的既有边界。关联 PRD：生效资产选择与展开、配置预览与确认写入、已管配置更新与保护。实现锚点：server.mjs 的 makeDeployment/projectConfiguration/composedPrompt，public/app.js 的 renderDeploy/previewDeploy，test/deployment-incremental.test.mjs。
+
+### API 概览
+
+deploy 的 incremental 模式接收本次选中项与 removeAssets，不把缺省或空选择解释为撤销。旧完整替换接口保留兼容；一键生效只调用增量模式。project-configuration 返回增量能力标记、项目应用版本与最新历史版本；旧服务缺少能力标记时禁止操作并提示重启，避免新界面调用旧替换逻辑。历史弹窗复用资产 history/diff 只读接口。
+
+### 数据模型与关键流程
+
+项目 manifest 持有独立引用、组合引用、显式排除成员及已解析资产快照。增量规划先读取原记录，以原应用快照解析未操作资产，只对本次选中资产和其展开依赖读取本机选用内容；再展开最终引用、去重、剔除显式排除项，交给既有文件规划。旧记录优先从记录的 Git 版本恢复快照；缺失版本不得悄悄升级既有内容。模型选择只影响本次更新，保留项沿用其解析后配置。
+
+### 状态机与一致性
+
+目标选择 → 加载应用记录 → 编辑待操作项 → 零写入预览 → 确认写入 → 重载状态。目标切换和成功后清空待操作项；迟到请求不能覆盖新目标。绿色/灰色/黄色是应用状态，勾选和待移除是独立操作状态。确认须校验预览计划摘要，资产、项目记录或文件在预览后改变时要求重新预览。
+
+### 异常处理与测试
+
+保留 Hooks/Rules 外部修改保护与受管路径边界。证明单成员更新不升级或删除其他成员、组合共享引用删除、成员显式排除、重复生效、模型与框架切换隔离、只删除的请求、旧记录迁移和预览无副作用。多文件写入沿用既有失败边界，不宣称跨文件事务。
 
 ## Skill画板图文协作
 
@@ -106,3 +131,10 @@ R13 验收：55 项测试通过。RUN_NATIVE_MODEL_TESTS=1 显式启用已安装
 服务资产新增可选 `modelCapabilities: [{ id, contextWindow, reasoning }]`；共享规范化函数校验 ID 唯一且属于列表，窗口 4096–2000000，reasoning 为 none/standard。定义随资产版本同步，密钥仍私有。模型编辑页按 ID 维护、发现合并保留能力、删除 ID 清除对应能力；旧记录优先从本机 Codex 应用历史带回。未保存前仍兼容旧应用行；存在通用字段时，服务端忽略应用输入中的能力，缺失行使用默认值。
 
 Codex 复用目录投影。Claude 按所有 picker、别名及版本映射目标的最小窗口写 `env.CLAUDE_CODE_MAX_CONTEXT_TOKENS`，家族及默认自定义选项写 `_SUPPORTED_CAPABILITIES=effort` 或空值；不关闭压缩、不伪造模型 ID。预览提示识别模型/[1m]/旧客户端与任意 picker ID 的限制。所有新增字段沿用叶子管理、预览哈希、首次原值撤销。实现：public/model-protocols.js、model-config.js、model-mapping.js、model-application.js、model-application.mjs；验证：test/model-mapping.test.mjs。
+
+
+### 模型图片输入能力（2026-10-27）
+
+模型能力增加可选布尔 imageInput，编辑页按 ID 保存，应用预览只读展示，服务端规范化后投影到 Codex 目录 input_modalities：启用为 text/image，关闭为 text。所有模型在旧记录缺少字段时默认文本和图片同时启用，显式 false 优先。能力属于服务资产，不允许应用映射覆盖已保存能力。旧应用历史带回及模型发现保留能力，预览令牌沿用现有保护。修改后必须保存、重新预览应用、重启 Codex 才能更新已生成目录。
+
+验证：test/model-image-capabilities.test.mjs 检查旧资产、显式关闭与输入校验；test/native-model-mapping.test.mjs 使用隔离配置和本地模拟 Responses 服务，实际 Codex 附图请求必须包含 input_image。此测试证明客户端图片传输，不代替供应商视觉识别验收。实现：public/model-protocols.js、model-config.js、model-mapping.js、model-application.js、model-catalog.mjs。

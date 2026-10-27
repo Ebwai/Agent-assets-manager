@@ -12,7 +12,7 @@ export function codexModelCatalog(mapping) {
     support_verbosity: false, default_verbosity: null, apply_patch_tool_type: null,
     truncation_policy: { mode: 'tokens', limit: 10000 },
     context_window: row.contextWindow, effective_context_window_percent: 95,
-    input_modalities: ['text'], experimental_supported_tools: [],
+    input_modalities: row.imageInput ? ['text', 'image'] : ['text'], experimental_supported_tools: [],
     supports_search_tool: false, use_responses_lite: false, multi_agent_version: 'v1'
   }));
   const text = JSON.stringify({ models }, null, 2) + '\n';

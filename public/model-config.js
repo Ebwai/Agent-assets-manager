@@ -1,4 +1,4 @@
-import { modelProtocols, modelProtocol, aiModelId, serviceModelIds } from './model-protocols.js';
+import { modelProtocols, modelProtocol, aiModelId, serviceModelIds, normalizeModelCapability } from './model-protocols.js';
 import { openModelApplication } from './model-application.js';
 
 export function renderModelFields(d, field, escapeHtml) {
@@ -26,8 +26,9 @@ export function renderModelFields(d, field, escapeHtml) {
 export function bindModelFields({ draft, api, notice, render, showModal, escapeHtml }) {
   const $ = selector => document.querySelector(selector);
   const refreshCapabilities = () => {
-    const rows = serviceModelIds(draft).map(id => ({ id, contextWindow: 32768, reasoning: 'none', ...draft.modelCapabilities?.find(row => row.id === id) }));
-    $('#model-capabilities').innerHTML = `<table class="model-mapping-table"><thead><tr><th>模型 ID</th><th>上下文窗口 tokens</th><th>多个推理强度</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${escapeHtml(row.id)}</td><td><input aria-label="${escapeHtml(row.id)} 上下文窗口" data-cap-context="${index}" type="number" min="4096" max="2000000" value="${row.contextWindow}"></td><td><select aria-label="${escapeHtml(row.id)} 推理强度" data-cap-reasoning="${index}"><option value="none" ${row.reasoning === 'none' ? 'selected' : ''}>关闭（不发送）</option><option value="standard" ${row.reasoning === 'standard' ? 'selected' : ''}>开启 low / medium / high</option></select></td></tr>`).join('')}</tbody></table>`;
+    const rows = serviceModelIds(draft).map(id => ({ id, ...normalizeModelCapability({ id }), ...draft.modelCapabilities?.find(row => row.id === id) }));
+    $('#model-capabilities').innerHTML = `<table class="model-mapping-table"><thead><tr><th>模型 ID</th><th>上下文窗口 tokens</th><th>多个推理强度</th><th>支持模态</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${escapeHtml(row.id)}</td><td><input aria-label="${escapeHtml(row.id)} 上下文窗口" data-cap-context="${index}" type="number" min="4096" max="2000000" value="${row.contextWindow}"></td><td><select aria-label="${escapeHtml(row.id)} 推理强度" data-cap-reasoning="${index}"><option value="none" ${row.reasoning === 'none' ? 'selected' : ''}>关闭（不发送）</option><option value="standard" ${row.reasoning === 'standard' ? 'selected' : ''}>开启 low / medium / high</option></select></td><td><label><input type="checkbox" checked disabled aria-label="${escapeHtml(row.id)} 文本输入"> 文本</label> <label><input type="checkbox" aria-label="${escapeHtml(row.id)} 图片输入" data-cap-image="${index}" ${row.imageInput ? 'checked' : ''}> 图片</label></td></tr>`).join('')}</tbody></table>`;
+    for (const input of document.querySelectorAll('[data-cap-image]')) input.onchange = () => { rows[Number(input.dataset.capImage)].imageInput = input.checked; save(); };
     const save = () => { draft.modelCapabilities = rows; };
     // Explicitly persist the complete per-model definition on the next asset save.
     save();
@@ -42,7 +43,7 @@ export function bindModelFields({ draft, api, notice, render, showModal, escapeH
       if (!host.isConnected || JSON.stringify(draft.modelCapabilities) !== initial) return;
       const old = saved.codex?.modelMapping?.models;
       if (old?.length) {
-        draft.modelCapabilities = draft.modelCapabilities.map(row => { const previous = old.find(item => item.id === row.id); return previous ? { id: row.id, contextWindow: previous.contextWindow ?? 32768, reasoning: previous.reasoning ?? 'none' } : row; });
+        draft.modelCapabilities = draft.modelCapabilities.map(row => { const previous = old.find(item => item.id === row.id); return previous ? { id: row.id, contextWindow: previous.contextWindow ?? 32768, reasoning: previous.reasoning ?? 'none', imageInput: normalizeModelCapability({ id: row.id, imageInput: previous.imageInput }).imageInput } : row; });
         refreshCapabilities();
       }
     }).catch(error => notice('旧应用能力配置读取失败：' + error.message, true));
