@@ -23,8 +23,8 @@ export function normalizeApplicationMapping(service, selectedModel, input = {}) 
     const id = requireId(row.id), label = row.label === undefined ? id : row.label;
     if (typeof label !== 'string' || !label.trim() || label.length > 200 || /[\r\n\t]/.test(label)) throw new Error('模型显示名称需为 1–200 个字符');
     // Saved model capabilities own these values; legacy application rows are fallback only.
-    const { contextWindow, reasoning } = normalizeModelCapability(service.modelCapabilities !== undefined ? service.modelCapabilities.find(item => item.id === id) : row);
-    return { id, label: label.trim(), contextWindow, reasoning };
+    const { contextWindow, reasoning, imageInput } = normalizeModelCapability({ id, ...(service.modelCapabilities !== undefined ? service.modelCapabilities.find(item => item.id === id) : row) });
+    return { id, label: label.trim(), contextWindow, reasoning, imageInput };
   });
   if (new Set(models.map(row => row.id)).size !== models.length) throw new Error('目标软件模型列表不能重复');
   if (!models.some(row => row.id === selectedModel)) throw new Error('默认模型必须包含在目标软件列表中');

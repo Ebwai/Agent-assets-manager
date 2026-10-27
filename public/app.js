@@ -72,7 +72,7 @@ function nav() {
   $('#skills-nav-toggle').onclick=()=>{ state.skillsNavOpen=!state.skillsNavOpen; nav(); };
   $$('[data-nav]').forEach(button=>button.onclick=()=>selectSection(button.dataset.nav));
 }
-function selectSection(section) { state.section=section; state.selected=null; state.draft=null; state.query=''; state.variant='common'; state.openFields={}; state.openYamlGroups={}; state.profileDrafts={}; state.lastProfileCopy=null; if(['skill','workflow'].includes(section)) state.skillsNavOpen=true; if(['hook','hookgroup'].includes(section)) state.hooksNavOpen=true; render(); }
+function selectSection(section) { if(section==='deploy'){state.deployStatusKey=null;state.deployStatus=null;state.deployRemovals=[];const d=state.deployment||{};state.deployment={projectId:d.projectId,software:d.software,modelId:d.modelId};} state.section=section; state.selected=null; state.draft=null; state.query=''; state.variant='common'; state.openFields={}; state.openYamlGroups={}; state.profileDrafts={}; state.lastProfileCopy=null; if(['skill','workflow'].includes(section)) state.skillsNavOpen=true; if(['hook','hookgroup'].includes(section)) state.hooksNavOpen=true; render(); }
 function emptyDraft(type) {
   const base={title:'',description:''};
   if(type==='skill') return {...base,variants:{common:{frontmatter:{name:'',description:'',metadata:{version:'1.0.0'}},descriptionParts:{what:'',when:'',keywords:''},body:'## Purpose / Overview\n\n## Core workflow\n\n1. \n\n## Input\n\n## Output\n\n## Key Points\n\n## Edge cases\n\n## Tools / resources\n\n## Verification\n'}},files:{}};
@@ -966,93 +966,170 @@ function renderSettings() {
   bindAssetIssues('settings',d);$$('[data-bind]').forEach(el=>el.oninput=e=>d[el.dataset.bind]=e.target.value);$('#settings-save').onclick=saveCurrent;$('#settings-history')?.addEventListener('click',()=>showHistory('settings',d.id));
 }
 function uiProfile(item,software,modelId) { if(!item) return null; if(!item.profiles||!Object.keys(item.profiles).length) return item; const profile=item.profiles[`${software}:${modelId}`]; return profile?{...item,...profile}:null; }
-function deployCheckboxList(type,selected,software,modelId) { const all=(state.assets[type]||[]).filter(item=>['hook','hookgroup','rule'].includes(type)?item.harness===software:uiProfile(item,software,modelId)); return all.length?`<div class="chips">${all.map(item=>`<label class="chip"><input type="checkbox" data-link="${type}" value="${item.id}" ${selected.includes(item.id)?'checked':''}> ${escapeHtml(item.title)}</label>`).join('')}</div>`:'<div class="small-note">这个组合尚无可用资产。</div>'; }
+
+function deploymentRef(type,id) {
+  return state.deployStatus?.assets?.find(ref=>ref.type===type && ref.id===id);
+}
+function deploymentCard(type,item,selected=[]) {
+  const ref=deploymentRef(type,item.id);
+  const removed=(state.deployRemovals || []).some(r=>r.type===type&&r.id===item.id);
+  const status=ref?(ref.hasNewVersion?'update':'applied'):'unused';
+  const text=ref?(ref.hasNewVersion?'有新版本':'已应用'):'未应用';
+  const input='checkbox';
+  return `<div class="deploy-card deploy-${status}${removed?' deploy-removing':''}" data-deploy-card="${type}/${escapeHtml(item.id)}">
+    <label><input type="${input}" ${type==='agent'?'name="deploy-agent-choice"':''} data-link="${type}" value="${escapeHtml(item.id)}" ${selected.includes(item.id)?'checked':''} ${removed||item.deleted||state.deployStatusLoading||state.deployStatusError?'disabled':''}><span>${escapeHtml(item.title)}<small>${removed?'待移除':text}${item.deleted?' · 资产库已删除':''}</small></span></label>
+    <button class="deploy-history" data-deploy-history="${type}" data-id="${escapeHtml(item.id)}" title="查看完整版本记录与项目应用版本" ${item.deleted?'disabled':''}>版本${status==='update'?' ↗':''}</button>
+    <button class="deploy-remove" data-deploy-remove="${type}" data-id="${escapeHtml(item.id)}" aria-label="${removed?'撤销移除':'从项目移除'} ${escapeHtml(item.title)}" title="${removed?'撤销待移除':'标记从项目移除，确认应用后生效'}" ${!ref||state.deployStatusLoading||state.deployStatusError?'disabled':''}>${removed?'↶':'×'}</button>
+  </div>`;
+}
+function bindDeploymentCards() {
+  $$('[data-deploy-history]').forEach(button=>button.onclick=()=>showDeploymentHistory(button.dataset.deployHistory,button.dataset.id));
+  $$('[data-deploy-card]').forEach(card=>card.onclick=event=>{
+    if(!event.target.closest('button, input') && card.classList.contains('deploy-update')) {
+      event.preventDefault();
+      const button=card.querySelector('[data-deploy-history]');button?.click();
+    }
+  });
+  $$('[data-deploy-remove]').forEach(button=>button.onclick=()=>{
+    state.deployment=deployValues();
+    const type=button.dataset.deployRemove,id=button.dataset.id;
+    const list=state.deployRemovals || [];
+    state.deployRemovals=list.some(r=>r.type===type&&r.id===id)?list.filter(r=>r.type!==type||r.id!==id):[...list,{type,id}];
+    const field={agent:'agentId',skill:'skillIds',workflow:'suiteIds',hook:'hookIds',hookgroup:'hookGroupIds',rule:'ruleIds',prompt:'promptIds'}[type];
+    state.deployment[field]=type==='agent'?'':(state.deployment[field] || []).filter(value=>value!==id);
+    renderDeploy();
+  });
+  $$('[data-link]').forEach(input=>input.onchange=()=>{
+    if(input.dataset.link==='agent') {
+      if(input.checked) $$('[data-link="agent"]').forEach(other=>{if(other!==input)other.checked=false;});
+      $('#deploy-agent').value=input.checked?input.value:'';
+    }
+    state.deployment=deployValues();
+    $('#deploy-result').innerHTML='';updateDeployAvailability();
+  });
+}
+async function showDeploymentHistory(type,id) {
+  const ref=deploymentRef(type,id);
+  try {
+    const entries=await api(`${type}/${id}/history`);
+    showModal('资产完整版本记录',`<p class="small-note">项目当前版本：${escapeHtml(ref?.version?.slice(0,7)||'尚未应用／旧记录未记录版本')}。勾选资产后应用本机当前选用版本；查看记录不改变版本选择。</p><div class="history">${entries.map((entry,index)=>`<div class="history-row"><div class="history-top"><strong>${escapeHtml(entry.message)}</strong><span class="scope-path">${escapeHtml(entry.short)}</span></div><p>${new Date(entry.date).toLocaleString('zh-CN')}</p><div class="chips">${entry.hash===ref?.version?'<span class="pill">项目当前应用版本</span>':''}${index===0?'<span class="pill">最新版本</span>':''}${entry.hash===(ref?.selectedVersion || (state.assets[type]||[]).find(a=>a.id===id)?.activeVersion || entries[0]?.hash)?'<span class="pill">本机选用版本</span>':''}</div><button class="btn btn-sm" data-deploy-diff="${entry.hash}">查看完整差异</button></div>`).join('') || '暂无版本记录'}</div>`);
+    $$('[data-deploy-diff]').forEach(button=>button.onclick=async()=>{
+      try {
+        const result=await api(`${type}/${id}/diff?hash=${button.dataset.deployDiff}`);
+        showVersionDiff(showModal,result,'<div class="modal-footer"><button class="btn" id="deploy-history-back">返回版本记录</button></div>');
+        $('#deploy-history-back').onclick=()=>showDeploymentHistory(type,id);
+      } catch(error){notice(error.message,true);}
+    });
+  } catch(error){notice(error.message,true);}
+}
+async function loadDeploymentStatus() {
+  const projectId=state.deployment?.projectId,software=state.deployment?.software || 'claude',modelId=state.deployment?.modelId || '';
+  const key=[projectId,software,modelId].join('/');
+  if(state.deployStatusKey===key) return;
+  state.deployStatusKey=key;state.deployStatus=null;state.deployStatusError='';state.deployStatusLoading=!!projectId;
+  state.deployRemovals=[];
+  if(!projectId) return;
+  try {
+    const result=await api(`project-configuration?projectId=${encodeURIComponent(projectId)}`);
+    if(state.deployStatusKey!==key) return;
+    if(!result.incrementalDeployment) throw Error('一键生效已升级，请重启助手服务后刷新页面，以启用增量应用。');
+    const status=result.deployments.find(item=>item.software===software);
+    if(status?.error) throw Error(status.error);
+    state.deployStatus=status;
+  } catch(error) {if(state.deployStatusKey===key) state.deployStatusError=error.message;}
+  finally {if(state.deployStatusKey===key){state.deployStatusLoading=false;if(state.section==='deploy')renderDeploy();}}
+}
+
+function deployCheckboxList(type,selected,software,modelId) {
+  if(state.section!=='deploy') {
+    const items=(state.assets[type]||[]).filter(item=>['hook','hookgroup','rule'].includes(type)?item.harness===software:uiProfile(item,software,modelId));
+    return items.length?`<div class="chips">${items.map(item=>`<label class="chip"><input type="checkbox" data-link="${type}" value="${escapeHtml(item.id)}" ${selected.includes(item.id)?'checked':''}> ${escapeHtml(item.title)}</label>`).join('')}</div>`:'<div class="small-note">这个组合尚无可用资产。</div>';
+  }
+  const all=(state.assets[type]||[]).filter(item=>deploymentRef(type,item.id)||(['hook','hookgroup','rule'].includes(type)?item.harness===software:uiProfile(item,software,modelId)));
+  for(const ref of state.deployStatus?.assets || []) if(ref.type===type&&!all.some(item=>item.id===ref.id)) all.push(ref);
+  return all.length?`<div class="deploy-cards">${all.map(item=>deploymentCard(type,item,selected)).join('')}</div>`:'<div class="small-note">这个组合尚无可用资产。</div>';
+}
 function deployAgentOptions(selected,software,modelId) { const all=(state.assets.agent||[]).filter(item=>uiProfile(item,software,modelId)); return `<option value="">不指定 Agent</option>${all.map(item=>`<option value="${item.id}" ${item.id===selected?'selected':''}>${escapeHtml(item.title)}</option>`).join('')}`; }
 function deployPromptCandidates() {
   const projectId=$('#deploy-project').value, software=$('#deploy-software').value, modelId=$('#deploy-model').value;
   return (state.assets.prompt||[]).map(item=>uiProfile(item,software,modelId)).filter(Boolean).filter(item=>item.scope==='global'||(item.scope==='project'&&item.target===projectId)||(item.scope==='model'&&item.target===modelId)||(item.scope==='software'&&item.target===software));
 }
-function renderDeployPromptChoices(selectedIds) {
+function renderDeployPromptChoices(selectedIds=[]) {
   const candidates=deployPromptCandidates();
-  const selected=new Set(selectedIds??candidates.map(item=>item.id));
+  for(const ref of state.deployStatus?.assets || []) if(ref.type==='prompt'&&!candidates.some(item=>item.id===ref.id)) candidates.push({...ref,scope:(state.assets.prompt||[]).find(item=>item.id===ref.id)?.scope || 'project'});
   const groups=[['global','通用'],['project','针对项目'],['model','针对模型'],['software','针对 Harness 框架']];
   $('#deploy-prompt-list').innerHTML=groups.map(([scope,label])=>{
     const items=candidates.filter(item=>item.scope===scope);
-    return `<div class="deploy-prompt-group"><strong>${label}</strong>${items.length?`<div class="chips">${items.map(item=>`<label class="chip" title="${escapeHtml(item.description||item.title)}"><input type="checkbox" data-deploy-prompt value="${escapeHtml(item.id)}" ${selected.has(item.id)?'checked':''}> ${escapeHtml(item.title)}</label>`).join('')}</div>`:`<small>${scope==='model'&&!$('#deploy-model').value?'先选择目标模型，或新建模型提示词':'当前没有匹配的提示词'}</small>`}</div>`;
+    return `<div class="deploy-prompt-group"><strong>${label}</strong>${items.map(item=>deploymentCard('prompt',item,selectedIds)).join('') || '<small>当前没有匹配的提示词</small>'}</div>`;
   }).join('');
-  $$('[data-deploy-prompt]').forEach(input=>input.onchange=()=>{ $('#deploy-result').innerHTML=''; updateDeployAvailability(); });
-  updateDeployAvailability();
+  bindDeploymentCards();
 }
 function updateDeployAvailability() {
-  const software=$('#deploy-software').value, modelId=$('#deploy-model').value;
-  const suites=$$('[data-link="workflow"]:checked').map(input=>input.value);
-  const direct=$$('[data-link="skill"]:checked').map(input=>input.value);
-  const agent=uiProfile((state.assets.agent||[]).find(item=>item.id===$('#deploy-agent').value),software,modelId);
-  const suiteAssets=(state.assets.workflow||[]).filter(item=>[...suites,...(agent?.workflowIds||[])].includes(item.id)).map(item=>uiProfile(item,software,modelId)).filter(Boolean);
-  const suiteSkillIds=suiteAssets.flatMap(item=>(item.members||((item.skillIds||[]).map(skillId=>({skillId})))).map(member=>member.skillId));
-  const allIds=[...direct,...(agent?.skillIds||[]),...suiteSkillIds];
-  const unique=new Set(allIds);
-  $('#deploy-skill-summary').textContent=`最终部署 ${unique.size} 个不重复的 Skill${allIds.length>unique.size?`；已去除 ${allIds.length-unique.size} 次重复选择`:''}。`;
   const project=(state.assets.project||[]).find(item=>item.id===$('#deploy-project').value);
-  $('#deploy-path-hint').textContent=project&&!project.directory?'该项目尚未分配本机路径。请到「项目」中选择本机目录。':project?.directory?`本机目标：${project.directory}`:'先选择目标项目。';
-  const selectedGroupIds=[...$$('[data-link="hookgroup"]:checked').map(input=>input.value),...(agent?.hookGroupIds||[])];
-  const groupHookIds=(state.assets.hookgroup||[]).filter(g=>selectedGroupIds.includes(g.id)).flatMap(g=>(g.members||[]).map(m=>m.hookId));
-  const allHookIds=[...$$('[data-link="hook"]:checked').map(input=>input.value),...(agent?.hookIds||[]),...groupHookIds];
-  const uniqueHooks=new Set(allHookIds);
-  $('#deploy-hook-summary').textContent=`最终部署 ${uniqueHooks.size} 个不重复的 Hook${allHookIds.length>uniqueHooks.size?`；已去除 ${allHookIds.length-uniqueHooks.size} 次重复选择`:''}。`;
-  const hookOnly=uniqueHooks.size+selectedGroupIds.length+$$('[data-link="rule"]:checked').length+(agent?.ruleIds?.length||0);
-  $('#deploy-preview').disabled=!project?.directory||(!modelId&&(agent||unique.size||$$('[data-deploy-prompt]:checked').length))||(!agent&&!unique.size&&!$$('[data-deploy-prompt]:checked').length&&!hookOnly&&!state.deployment?.hooksPreviouslyApplied&&!state.deployment?.rulesPreviouslyApplied);
+  $('#deploy-path-hint').textContent=project?.directory?`本机目标：${project.directory}`:'先选择已分配本机目录的项目。';
+  const selected=$$('[data-link]:checked');
+  const requireModel=selected.some(input=>['agent','skill','workflow','prompt'].includes(input.dataset.link));
+  const removed=(state.deployRemovals||[]).length;
+  $('#deploy-skill-summary').textContent=`本次选择 ${selected.filter(input=>['skill','workflow'].includes(input.dataset.link)).length} 项 Skill / 套件操作；未操作的已应用资产保持原版本。`;
+  $('#deploy-hook-summary').textContent=`本次待移除 ${removed} 项资产。移除需预览并确认。`;
+  $('#deploy-preview').disabled=!project?.directory || state.deployStatusLoading || !!state.deployStatusError || (!selected.length&&!removed) || (requireModel&&!$('#deploy-model').value);
 }
 function renderDeploy() {
-  const projects=state.assets.project||[], agents=state.assets.agent||[];
-  const chosenProject=projects.find(project=>project.id===state.deployment?.projectId);
-  const chosenAgent=agents.find(agent=>agent.id===state.deployment?.agentId);
-  const selectedSuites=state.deployment?.suiteIds??chosenProject?.suiteIds??[];
-  const software=state.deployment?.software||'claude', modelId=state.deployment?.modelId||chosenAgent?.modelId||'';
-  $('#content').innerHTML=`<div class="intro"><div><h2>组合并应用 Agent 资产</h2><p>选择目标项目与软件，再组合 Agent、单个 Skills、Skills 套件、Hooks 和系统提示词。预览确认后生效。</p></div></div>
+  loadDeploymentStatus();
+  const d=state.deployment || {},software=d.software || 'claude',modelId=d.modelId || '';
+  $('#content').innerHTML=`<div class="intro"><div><h2>一键生效 · 项目资产</h2><p>勾选资产以新增或更新，未操作的资产保留项目当前版本。点击 × 标记移除，预览并确认后生效。</p></div></div>
     <div class="panel editor"><div class="form-grid">
-      <div class="field"><label class="field-label" for="deploy-project">目标项目</label><select id="deploy-project">${options('project',state.deployment?.projectId)}</select><span class="hint" id="deploy-path-hint"></span></div>
-      <div class="field"><label class="field-label" for="deploy-software">Harness 框架 <span class="pill">必选</span></label><select id="deploy-software"><option value="claude" ${software==='claude'?'selected':''}>Claude Code</option><option value="codex" ${software==='codex'?'selected':''}>Codex</option></select></div>
+      <div class="field"><label class="field-label" for="deploy-project">目标项目</label><select id="deploy-project">${options('project',d.projectId)}</select><span class="hint" id="deploy-path-hint"></span></div>
+      <div class="field"><label class="field-label" for="deploy-software">Harness 框架</label><select id="deploy-software"><option value="claude" ${software==='claude'?'selected':''}>Claude Code</option><option value="codex" ${software==='codex'?'selected':''}>Codex</option></select></div>
       <div class="field"><label class="field-label" for="deploy-model">模型版本 <span class="pill gray">仅 Hooks / Rules 可不选</span></label><select id="deploy-model">${options('model',modelId)}</select></div>
-      <div class="field"><label class="field-label" for="deploy-agent">Agent（可选）</label><select id="deploy-agent">${deployAgentOptions(state.deployment?.agentId,software,modelId)}</select></div>
+      <select id="deploy-agent" hidden>${deployAgentOptions(d.agentId,software,modelId)}</select>
     </div>
-    <div class="section-title">Skills</div><div class="deploy-asset-group"><strong>单个 Skills</strong>${deployCheckboxList('skill',state.deployment?.skillIds||[],software,modelId)}</div>
-    <div class="deploy-asset-group"><strong>Skills 套件</strong>${deployCheckboxList('workflow',selectedSuites,software,modelId)}</div>
+    <div class="deploy-legend" aria-label="资产状态图例"><span class="deploy-applied">绿色：已应用</span><span class="deploy-unused">灰色：未应用</span><span class="deploy-update">黄色：有更新，点击版本查看记录</span></div>
+    <p class="small-note">颜色表示项目现状；勾选表示本次新增 / 更新，× 表示待移除，↶ 可撤销。状态按项目与框架读取；模型版本用于匹配本次应用内容。${state.deployStatus?.modelId&&state.deployStatus.modelId!==modelId?' 项目中未更新资产继续保留原模型配置。':''}</p>
+    ${state.deployStatusLoading?'<p role="status">正在读取项目应用状态…</p>':''}
+    ${state.deployStatusError?`<p class="dialog-error" role="alert">无法读取应用状态：${escapeHtml(state.deployStatusError)}</p><button class="btn" id="retry-deploy-status">重新加载</button>`:''}
+    <div class="section-title">Agent</div>${deployCheckboxList('agent',d.agentId?[d.agentId]:[],software,modelId)}
+    <div class="section-title">Skills</div><div class="deploy-asset-group"><strong>单个 Skills（包含套件成员）</strong>${deployCheckboxList('skill',d.skillIds||[],software,modelId)}</div>
+    <div class="deploy-asset-group"><strong>Skills 套件</strong>${deployCheckboxList('workflow',d.suiteIds||[],software,modelId)}</div>
     <p class="small-note" id="deploy-skill-summary"></p>
-    <div class="section-title">Hooks</div><div class="deploy-asset-group"><strong>单个 Hook</strong>${deployCheckboxList('hook',state.deployment?.hookIds||[],software,modelId)}</div><div class="deploy-asset-group"><strong>Hooks 组</strong>${deployCheckboxList('hookgroup',state.deployment?.hookGroupIds||[],software,modelId)}</div><p class="small-note" id="deploy-hook-summary"></p><p class="small-note">项目级自动脚本，适用于所有模型。预览会显示配置与完整脚本；取消勾选后再次生效可移除助手管理的 Hooks。</p>
-    ${software==='claude'?`<div class="section-title">Rules</div>${deployCheckboxList('rule',state.deployment?.ruleIds||chosenProject?.ruleIds||[],software,modelId)}<p class="small-note">不绑定模型。Agent 关联与直接选择会去重；取消选择并再次生效可移除助手管理的规则。</p>`:''}
-    <div class="section-title">系统提示词</div>
-    <div id="deploy-prompt-list" class="deploy-prompt-list"></div><p class="small-note">按通用 → 模型 → Harness 框架 → 项目的顺序组合；只应用勾选的提示词。组合文档会写入项目，并同步到目标软件的项目指令。</p>
-    <div class="quick-links"><button class="btn" id="compose-preview">预览系统提示词</button><button class="btn btn-primary" id="deploy-preview">预览生效内容</button></div>
-    <div class="small-note" style="margin-top:13px">目标目录需已存在。同一个 Skill 即使从套件和单独选择中重复出现，也只部署一次。</div><div id="deploy-result"></div></div>`;
-  const invalidate=()=>{ $('#deploy-result').innerHTML=''; updateDeployAvailability(); };
-  $('#deploy-project').onchange=event=>{ const project=projects.find(item=>item.id===event.target.value); $$('[data-link="workflow"]').forEach(input=>input.checked=(project?.suiteIds||[]).includes(input.value)); renderDeployPromptChoices(); invalidate(); loadDeployHooks(true); };
-  $('#deploy-software').onchange=()=>{state.deployment=deployValues();state.deployment.agentId='';renderDeploy();};
-  $('#deploy-agent').onchange=()=>{ renderDeployPromptChoices(); invalidate(); };
-  $('#deploy-model').onchange=()=>{state.deployment=deployValues();state.deployment.agentId='';renderDeploy();};
-  $$('[data-link="workflow"], [data-link="skill"], [data-link="hook"], [data-link="hookgroup"], [data-link="rule"]').forEach(input=>input.onchange=invalidate);
-  renderDeployPromptChoices(state.deployment?.promptIds);
+    <div class="section-title">Hooks</div><div class="deploy-asset-group"><strong>单个 Hook</strong>${deployCheckboxList('hook',d.hookIds||[],software,modelId)}</div><div class="deploy-asset-group"><strong>Hooks 组</strong>${deployCheckboxList('hookgroup',d.hookGroupIds||[],software,modelId)}</div><p class="small-note" id="deploy-hook-summary"></p>
+    ${software==='claude'?`<div class="section-title">Rules</div>${deployCheckboxList('rule',d.ruleIds||[],software,modelId)}`:''}
+    <div class="section-title">系统提示词</div><div id="deploy-prompt-list" class="deploy-prompt-list"></div>
+    <div class="quick-links"><button class="btn btn-primary" id="deploy-preview">预览生效内容</button></div>
+    <p class="small-note">同一个资产从多个来源引用时只部署一次。移除组合保留其他来源仍在引用的成员；单独移除成员会从项目中排除该成员。</p><div id="deploy-result"></div></div>`;
+  const changeTarget=()=>{
+    state.deployment={projectId:$('#deploy-project').value,software:$('#deploy-software').value,modelId:$('#deploy-model').value};
+    state.deployStatusKey=null;state.deployStatus=null;state.deployRemovals=[];
+    renderDeploy();
+  };
+  for(const id of ['deploy-project','deploy-software','deploy-model']) $('#'+id).onchange=changeTarget;
+  renderDeployPromptChoices(d.promptIds || []);
   updateDeployAvailability();
-  loadDeployHooks();
   $('#deploy-preview').onclick=()=>previewDeploy();
-  $('#compose-preview').onclick=async()=>{ const values=deployValues(); try { const result=await api('compose','POST',values); const file=`.agent-asset-manager/${values.software}-system-prompt.md`; const target=values.software==='claude'?'CLAUDE.md':'AGENTS.md'; $('#deploy-result').innerHTML=`<div class="section-title">系统提示词组合 · ${result.layers.length} 层</div><div class="chips">${result.layers.map(item=>`<span class="chip">${escapeHtml(item.scope)} · ${escapeHtml(item.title)}</span>`).join('')}</div><p class="small-note">组合文档：${file}；生效后同步写入 ${target}。</p><pre class="markdown-preview" style="margin-top:12px">${escapeHtml(result.text||'尚未选择系统提示词。')}</pre>`; } catch(error) { notice(error.message,true); } };
+  if($('#retry-deploy-status')) $('#retry-deploy-status').onclick=()=>{state.deployStatusKey=null;loadDeploymentStatus();};
 }
-function deployValues() { return {projectId:$('#deploy-project').value,agentId:$('#deploy-agent').value,software:$('#deploy-software').value,modelId:$('#deploy-model').value,hookIds:$$('[data-link="hook"]:checked').map(input=>input.value),hookGroupIds:$$('[data-link="hookgroup"]:checked').map(input=>input.value),ruleIds:$$('[data-link="rule"]:checked').map(input=>input.value),rulesPreviouslyApplied:state.deployment?.rulesPreviouslyApplied||false,hooksPreviouslyApplied:state.deployment?.hooksPreviouslyApplied||false,hooksTarget:state.deployment?.hooksTarget,skillIds:$$('[data-link="skill"]:checked').map(input=>input.value),suiteIds:$$('[data-link="workflow"]:checked').map(input=>input.value),promptIds:$$('[data-deploy-prompt]:checked').map(input=>input.value)}; }
-async function loadDeployHooks(reset=false) {
-  const projectId=$('#deploy-project').value,software=$('#deploy-software').value;
-  state.deployment||={};
-  if(!projectId){state.deployment.hooksPreviouslyApplied=false;state.deployment.rulesPreviouslyApplied=false;updateDeployAvailability();return;}
+function deployValues() {
+  const ids=type=>$$('[data-link="'+type+'"]:checked').map(input=>input.value);
+  return {incremental:true,projectId:$('#deploy-project').value,software:$('#deploy-software').value,modelId:$('#deploy-model').value,agentId:ids('agent')[0] || '',skillIds:ids('skill'),suiteIds:ids('workflow'),hookIds:ids('hook'),hookGroupIds:ids('hookgroup'),ruleIds:ids('rule'),promptIds:ids('prompt'),removeAssets:state.deployRemovals || []};
+}
+async function previewDeploy() {
+  const values=deployValues();state.deployment=values;
   try {
-    const status=await api(`deployment-hooks?projectId=${encodeURIComponent(projectId)}&software=${software}`);
-    if(state.section!=='deploy'||$('#deploy-project').value!==projectId||$('#deploy-software').value!==software)return;
-    const key=`${projectId}:${software}`;
-    const changed=reset||state.deployment.hooksTarget!==key;
-    state.deployment.hooksPreviouslyApplied=status.applied;state.deployment.rulesPreviouslyApplied=status.rulesApplied; state.deployment.hooksTarget=key;
-    if(changed){$$('[data-link="hook"]').forEach(input=>input.checked=status.hookIds.includes(input.value));state.deployment.hookIds=status.hookIds;const groupIds=status.hookGroupIds||[];$$('[data-link="hookgroup"]').forEach(input=>input.checked=groupIds.includes(input.value));state.deployment.hookGroupIds=groupIds;const defaults=(state.assets.project||[]).find(p=>p.id===projectId)?.ruleIds||[];const ruleIds=status.rulesApplied?status.ruleIds:defaults;$$('[data-link="rule"]').forEach(input=>input.checked=ruleIds.includes(input.value));state.deployment.ruleIds=ruleIds;}
-    updateDeployAvailability();
-  }catch(error){if(state.section!=='deploy')return;state.deployment.hooksPreviouslyApplied=false;updateDeployAvailability();}
+    const result=await api('deploy','POST',{...values,preview:true});
+    if(state.section!=='deploy' || $('#deploy-project').value!==values.projectId || $('#deploy-software').value!==values.software || $('#deploy-model').value!==values.modelId) return;
+    $('#deploy-result').innerHTML=`<div class="section-title">将写入 ${result.files.length} 个文件${result.removals?.length?`，移除 ${result.removals.length} 个旧文件`:''}</div><div class="preview-list">${result.files.map(file=>`<details class="preview-file"><summary>${escapeHtml(file.path)}${file.writeMode==='replace'?' <span class="pill">覆盖全部内容</span>':''}</summary><pre>${escapeHtml(file.content)}</pre></details>`).join('')}${(result.removals||[]).map(file=>`<div class="preview-file deploy-removal-path">移除旧文件：${escapeHtml(file)}</div>`).join('')}</div><div class="quick-links"><button class="btn btn-primary" id="deploy-apply">确认生效</button></div>`;
+    $('#deploy-apply').onclick=async()=>{
+      if(!await askConfirm('确认应用资产',`确认将本次新增、更新和 ${values.removeAssets.length} 项移除应用到「${result.project}」？未操作资产保留原版本。${result.files.some(file=>file.writeMode==='replace')?' 项目指令文件将覆盖全部旧内容。':''}`)) return;
+      const button=$('#deploy-apply');button.disabled=true;
+      try {
+        await api('deploy','POST',{...values,preview:false,previewToken:result.previewToken});
+        state.deployment={projectId:values.projectId,software:values.software,modelId:values.modelId};
+        state.deployRemovals=[];state.deployStatusKey=null;
+        renderDeploy();notice('已生效，项目资产状态已重新读取。');
+      } catch(error){notice(error.message,true);button.disabled=false;}
+    };
+  } catch(error){notice(error.message,true);}
 }
-async function previewDeploy() { const values=deployValues(); state.deployment=values; try{const result=await api('deploy','POST',{...values,preview:true});$('#deploy-result').innerHTML=`<div class="section-title">将写入 ${result.files.length} 个文件${result.removals?.length?`，移除 ${result.removals.length} 个旧文件`:''}</div><div class="preview-list">${result.files.map(x=>`<details class="preview-file"><summary>${escapeHtml(x.path)}${x.writeMode==='replace'?' <span class="pill">覆盖全部内容</span>':''}</summary><pre>${escapeHtml(x.content)}</pre></details>`).join('')}${(result.removals||[]).map(x=>`<div class="preview-file" style="padding:10px 12px;color:#b55e65;font-size:11px">移除旧文件：${escapeHtml(x)}</div>`).join('')}</div><div class="quick-links"><button class="btn btn-primary" id="deploy-apply">确认生效</button></div>`;$('#deploy-apply').onclick=async()=>{if(!await askConfirm('确认应用资产',`确认将 ${result.files.length} 个文件写入「${result.project}」？${result.files.some(file=>file.writeMode==='replace')?' 项目指令文件将覆盖全部旧内容。':''}`))return;try{const applied=await api('deploy','POST',{...values,preview:false});state.deployment.hooksPreviouslyApplied=values.hookIds.length>0||values.hookGroupIds.length>0||(uiProfile((state.assets.agent||[]).find(a=>a.id===values.agentId),values.software,values.modelId)?.hookGroupIds||[]).length>0||(state.assets.agent.find(a=>a.id===values.agentId)?.profiles?.[`${values.software}:${values.modelId}`]?.hookIds||[]).length>0; state.deployment.rulesPreviouslyApplied=values.ruleIds.length>0||(uiProfile((state.assets.agent||[]).find(a=>a.id===values.agentId),values.software,values.modelId)?.ruleIds||[]).length>0; notice(`已生效：写入 ${applied.files.length} 个文件。`);$('#deploy-result').insertAdjacentHTML('beforeend',`<div class="callout" style="margin-top:15px">配置已写入目标项目，可在「项目」查看当前配置资产。${state.deployment.hooksPreviouslyApplied?'请在目标软件中检查 /hooks；Codex 的新增或修改 Hooks 还需审查并信任。':''}</div>`);}catch(e){notice(e.message,true);}};}catch(e){notice(e.message,true);} }
 function renderSync() {
   const sync=state.sync||{}, conflicts=sync.conflicts||[];
   const summary=sync.connected?(sync.conflict?'有待处理的同步冲突':sync.ahead&&sync.behind?`本机待上传 ${sync.ahead} 次，远程待下载 ${sync.behind} 次`:sync.ahead?`本机待上传 ${sync.ahead} 次`:sync.behind?`远程待下载 ${sync.behind} 次`:'已连接；可点击同步检查远程更新'):'尚未连接 GitHub 仓库';

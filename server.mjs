@@ -665,10 +665,10 @@ function renderSkill(v, software = 'common') {
   return lines.join('\n');
 }
 function getVariant(skill, software) { return skill.variants?.[software] || skill.variants?.common || Object.values(skill.variants || {})[0]; }
-function composedPrompt(config) {
+function composedPrompt(config, resolvedAssets) {
   const { modelId, software, projectId, promptIds = [] } = config;
-  if (!modelId && promptIds.some(id => get('prompt', id)?.profiles && Object.keys(get('prompt', id).profiles).length)) throw new Error('请选择模型版本以匹配系统提示词');
-  const all = list('prompt').flatMap(item => {
+  if (!resolvedAssets && !modelId && promptIds.some(id => get('prompt', id)?.profiles && Object.keys(get('prompt', id).profiles).length)) throw new Error('请选择模型版本以匹配系统提示词');
+  const all = (resolvedAssets ? promptIds.map(id=>resolvedAssets['prompt/'+id] || get('prompt',id)).filter(Boolean) : list('prompt')).flatMap(item => {
     try { return [forProfile('prompt', item, software, modelId)]; } catch { return []; }
   });
   if (!Array.isArray(promptIds)) throw new Error('系统提示词选择无效');
@@ -676,7 +676,7 @@ function composedPrompt(config) {
   const explicit = Object.hasOwn(config, 'promptIds');
   const selected = explicit ? all.filter(p => promptIds.includes(p.id)) : all.filter(p => eligible(p) || (config.additionalPromptIds || []).includes(p.id));
   if (explicit && selected.length !== new Set(promptIds).size) throw new Error('选择的系统提示词不存在');
-  if (explicit && selected.some(p => !eligible(p))) throw new Error('系统提示词与目标项目、模型或 Harness 不匹配');
+  if (!resolvedAssets && explicit && selected.some(p => !eligible(p))) throw new Error('系统提示词与目标项目、模型或 Harness 不匹配');
   const order = { global: 0, model: 1, software: 2, project: 3 };
   selected.sort((a,b) => order[a.scope] - order[b.scope] || a.title.localeCompare(b.title));
   return { layers: selected.map(x => ({ id:x.id, title:x.title, scope:x.scope })), text: selected.map(x => `## ${x.title}\n\n${x.content || ''}`).join('\n\n') };
@@ -703,28 +703,116 @@ function managedTomlBlock(existing, content) {
 }
 function tomlString(value) { return JSON.stringify(String(value)); }
 function suiteMembers(suite) { return suite.members || (suite.skillIds || []).map(skillId => ({ skillId, role: '' })); }
+
+
+function deploymentToken(plan) {
+  const paths=[...new Set([...plan.files.map(file=>file.path),...plan.removals])].sort();
+  return crypto.createHash('sha256').update(JSON.stringify({
+    files:plan.files.map(file=>{
+      let content=Buffer.isBuffer(file.content)?file.content.toString('base64'):file.content;
+      if(file.path.includes(path.sep+'.agent-asset-manager'+path.sep) && /(?:claude|codex)\.json$/.test(file.path)) {
+        const manifest=JSON.parse(content);delete manifest.updatedAt;content=JSON.stringify(manifest);
+      }
+      return [file.path,content];
+    }),
+    removals:plan.removals,
+    before:paths.map(file=>[file,fs.existsSync(file)&&fs.statSync(file).isFile()?crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'):null])
+  })).digest('hex');
+}
+
+function incrementalDeployment(body) {
+  const project = assertProject(body.projectId);
+  if (!['claude','codex'].includes(body.software)) throw Error('请选择目标框架');
+  const manifestPath = path.join(project.directory,'.agent-asset-manager',body.software+'.json');
+  assertHookDestination(project.directory,manifestPath);
+  const previous = readJson(manifestPath,{});
+  const snapshots = {};
+  for (const ref of previous.assetSnapshots || []) {
+    let asset = previous.assetContents?.[ref.type+'/'+ref.id];
+    if (!asset && ref.version) {
+      if (!/^[0-9a-f]{40}$/.test(ref.version)) throw Error('应用版本记录无效');
+      try {
+        asset = localize(ref.type,JSON.parse(git(['show',ref.version+':assets/'+safeType(ref.type)+'/'+safeId(ref.id)+'.json'])));
+        asset = forProfile(ref.type,asset,body.software,previous.modelId || '');
+        asset = {...asset,profiles:{},activeVersion:ref.version};
+      } catch { throw Error('无法恢复项目已应用版本，请先修复资产历史记录'); }
+    }
+    if (!asset) throw Error('旧生效记录缺少资产版本，请先使用完整配置重新生效');
+    snapshots[ref.type+'/'+ref.id] = asset;
+  }
+  if (previous.updatedAt && !previous.assetSnapshots) throw Error('旧生效记录缺少资产版本，请先使用完整配置重新生效');
+  const removed = new Set(previous.excludedAssets || []);
+  const changes = body.removeAssets || [];
+  if (!Array.isArray(changes)) throw Error('移除资产选择无效');
+  for (const ref of changes) {
+    if (!['agent','workflow','skill','prompt','hook','hookgroup','rule'].includes(ref.type)) throw Error('移除资产类型无效');
+    removed.add(ref.type+'/'+safeId(ref.id));
+  }
+  const touched = new Set();
+  const visit = (type,id,dependency=false) => {
+    const key=type+'/'+safeId(id);
+    if (touched.has(key)) return;
+    if (changes.some(ref=>ref.type===type&&ref.id===id)) {
+      if(dependency) return;
+      throw Error('同一资产不能同时更新和移除');
+    }
+    if(dependency && removed.has(key)) return;
+    touched.add(key); removed.delete(key);
+    const original=get(type,id);
+    if (!original) throw Error('选择的资产不存在');
+    const asset=forProfile(type,original,body.software,body.modelId || '');
+    if(type==='prompt' && !(asset.scope==='global' || (asset.scope==='project'&&asset.target===body.projectId) || (asset.scope==='model'&&asset.target===body.modelId) || (asset.scope==='software'&&asset.target===body.software))) throw Error('系统提示词与目标项目、模型或 Harness 不匹配');
+    snapshots[key]={...asset,profiles:{},activeVersion:original.activeVersion || history(type,id)[0]?.hash || ''};
+    if (type==='workflow') for (const member of suiteMembers(asset)) visit('skill',member.skillId,true);
+    if (type==='hookgroup') for (const member of asset.members || []) visit('hook',member.hookId,true);
+    if (type==='agent') for (const [child,field] of [['skill','skillIds'],['workflow','workflowIds'],['prompt','promptIds'],['hook','hookIds'],['hookgroup','hookGroupIds'],['rule','ruleIds']]) for(const id of asset[field] || []) visit(child,id,true);
+  };
+  const fields=[['skill','skillIds'],['workflow','suiteIds'],['prompt','promptIds'],['hook','hookIds'],['hookgroup','hookGroupIds'],['rule','ruleIds']];
+  const oldAgent=snapshots['agent/'+previous.agentId];
+  const roots=previous.roots || {
+    agentId:previous.agentId || '', skillIds:previous.directSkillIds || (previous.skillIds || []).filter(id=>!(previous.suiteIds || []).some(sid=>suiteMembers(snapshots['workflow/'+sid] || {}).some(m=>m.skillId===id)) && !(snapshots['agent/'+previous.agentId]?.skillIds || []).includes(id)),
+    suiteIds:(previous.suiteIds || []).filter(id=>!(oldAgent?.workflowIds || []).includes(id)), promptIds:(previous.promptIds || []).filter(id=>!(oldAgent?.promptIds || []).includes(id)), hookIds:previous.directHookIds || (previous.hookIds || []).filter(id=>!(oldAgent?.hookIds || []).includes(id) && !(previous.hookGroupIds || []).some(gid=>(snapshots['hookgroup/'+gid]?.members || []).some(m=>m.hookId===id))), hookGroupIds:(previous.hookGroupIds || []).filter(id=>!(oldAgent?.hookGroupIds || []).includes(id)), ruleIds:(previous.ruleIds || []).filter(id=>!(oldAgent?.ruleIds || []).includes(id))
+  };
+  const next={...body,agentId:body.agentId || roots.agentId || '',resolvedAssets:snapshots,excludedAssets:[...removed]};
+  if(body.agentId) visit('agent',body.agentId);
+  if(removed.has('agent/'+next.agentId)) next.agentId='';
+  for(const [type,field] of fields) {
+    const additions=body[field] || [];
+    if(!Array.isArray(additions)) throw Error('资产选择无效');
+    for(const id of additions) visit(type,id);
+    next[field]=[...new Set([...(roots[field] || []),...additions])].filter(id=>!removed.has(type+'/'+id));
+  }
+  next.excludedAssets=[...removed];
+  next.roots=Object.fromEntries(['agentId',...fields.map(([,field])=>field)].map(field=>[field,next[field]]));
+  return next;
+}
+
 function makeDeployment(body) {
+  if (body.incremental) body = incrementalDeployment(body);
+  const resolveAsset = (type,id) => body.resolvedAssets?.[type+'/'+id] || get(type,id);
+  const excluded = (type,id) => (body.excludedAssets || []).includes(type+'/'+id);
   const project = assertProject(body.projectId);
   const software = body.software;
   if (!['claude', 'codex'].includes(software)) throw new Error('请选择 Claude Code 或 Codex');
-  const agentAsset = body.agentId ? get('agent', body.agentId) : null;
+  const agentAsset = body.agentId ? resolveAsset('agent', body.agentId) : null;
   const modelId = body.modelId || (agentAsset?.profiles && Object.keys(agentAsset.profiles).length ? '' : agentAsset?.modelId || '');
   if (modelId && !rawGet('model', safeId(modelId))) throw new Error('所选模型版本不存在');
-  const agent = body.agentId ? forProfile('agent', get('agent', body.agentId), software, modelId) : null;
+  const agent = body.agentId ? forProfile('agent', resolveAsset('agent', body.agentId), software, modelId) : null;
   if (body.agentId && !agent) throw new Error('Agent 不存在');
   if (agent?.harness && agent.harness !== software) throw new Error(`此 Agent 适用于 ${agent.harness === 'claude' ? 'Claude Code' : 'Codex'}，请切换目标软件`);
   const selectedSuiteIds = body.suiteIds === undefined ? (project.suiteIds || []) : body.suiteIds;
   if (!Array.isArray(selectedSuiteIds)) throw new Error('Skills 套件选择无效');
   if (body.skillIds !== undefined && !Array.isArray(body.skillIds)) throw new Error('单个 Skills 选择无效');
-  const suiteIds = [...new Set([...(agent?.workflowIds || []), ...selectedSuiteIds])];
-  const directSkillIds = [...new Set([...(agent?.skillIds || []), ...(body.skillIds || [])])];
-  const skills = directSkillIds.map(id => forProfile('skill', get('skill', id), software, modelId));
+  const suiteIds = [...new Set([...(agent?.workflowIds || []), ...selectedSuiteIds])].filter(id=>!excluded('workflow',id));
+  const directSkillIds = [...new Set([...(agent?.skillIds || []), ...(body.skillIds || [])])].filter(id=>!excluded('skill',id));
+  const skills = directSkillIds.map(id => forProfile('skill', resolveAsset('skill', id), software, modelId));
   if (skills.some(x => !x)) throw new Error('选择的 Skill 不存在');
-  const suites = suiteIds.map(id => forProfile('workflow', get('workflow', id), software, modelId));
+  const suites = suiteIds.map(id => forProfile('workflow', resolveAsset('workflow', id), software, modelId));
   if (suites.some(x => !x)) throw new Error('选择的 Skills 套件不存在');
   const selected = new Map(skills.map(x => [x.id, x]));
   for (const suite of suites) for (const member of suiteMembers(suite)) {
-    const skill = forProfile('skill', get('skill', member.skillId), software, modelId);
+    if (excluded('skill',member.skillId)) continue;
+    const skill = forProfile('skill', resolveAsset('skill', member.skillId), software, modelId);
     if (!skill) throw new Error(`套件 ${suite.title} 引用了已删除的 Skill`);
     selected.set(member.skillId, skill);
   }
@@ -736,9 +824,9 @@ function makeDeployment(body) {
     if (fs.existsSync(file) && crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== hash) throw new Error('助手管理的 Rule 已在项目中修改，请先保存修改或恢复原文件');
   }
   if (body.ruleIds !== undefined && !Array.isArray(body.ruleIds)) throw new Error('Rules 选择无效');
-  const ruleIds = [...new Set([...(agent?.ruleIds || []), ...(body.ruleIds ?? (software === 'claude' ? project.ruleIds || [] : []))])];
+  const ruleIds = [...new Set([...(agent?.ruleIds || []), ...(body.ruleIds ?? (software === 'claude' ? project.ruleIds || [] : []))])].filter(id=>!excluded('rule',id));
   if (ruleIds.length && software !== 'claude') throw new Error('Rules 仅支持 Claude Code');
-  const rules = ruleIds.map(id => get('rule', id));
+  const rules = ruleIds.map(id => resolveAsset('rule', id));
   if (rules.some(rule => !rule)) throw new Error('所选 Rule 不存在');
   for (const [file, hash] of Object.entries(previous.hookFiles || {})) {
     assertHookDestination(projectRoot, file);
@@ -746,15 +834,15 @@ function makeDeployment(body) {
   }
   if (body.hookIds !== undefined && !Array.isArray(body.hookIds)) throw new Error('Hooks 选择无效');
   if(body.hookGroupIds!==undefined&&!Array.isArray(body.hookGroupIds))throw Error('Hooks 组选择无效');
-  const hookGroupIds=[...new Set([...(agent?.hookGroupIds||[]),...(body.hookGroupIds||[])])];
-  const hookGroups=hookGroupIds.map(id=>get('hookgroup',id));
+  const hookGroupIds=[...new Set([...(agent?.hookGroupIds||[]),...(body.hookGroupIds||[])])].filter(id=>!excluded('hookgroup',id));
+  const hookGroups=hookGroupIds.map(id=>resolveAsset('hookgroup',id));
   for(const group of hookGroups) {
     if(!group||group.harness!==software)throw Error('所选 Hooks 组不存在或不适用于目标软件');
     validateAsset('hookgroup',group);
   }
   const directHookIds=[...new Set(body.hookIds||[])];
-  const hookIds = [...new Set([...(agent?.hookIds || []), ...directHookIds, ...hookGroups.flatMap(group=>group.members.map(member=>member.hookId))])];
-  const hooks = hookIds.map(id => get('hook', id));
+  const hookIds = [...new Set([...(agent?.hookIds || []), ...directHookIds, ...hookGroups.flatMap(group=>group.members.map(member=>member.hookId))])].filter(id=>!excluded('hook',id));
+  const hooks = hookIds.map(id => resolveAsset('hook', id));
   if (hooks.some(a => !a || a.harness !== software)) throw new Error('所选 Hook 不存在或不适用于目标软件');
   const skillRoot = path.join(projectRoot, software === 'claude' ? '.claude/skills' : '.agents/skills');
   const files = [];
@@ -785,14 +873,14 @@ function makeDeployment(body) {
     for (const [name, content] of Object.entries(skill.files || {})) files.push({ path: path.join(dir, safeResourcePath(name)), content: typeof content === 'string' ? content : Buffer.from(content.data, 'base64') });
   }
   const promptConfig = { modelId, software, projectId: project.id };
-  if (body.promptIds !== undefined) promptConfig.promptIds = body.promptIds;
+  if (body.promptIds !== undefined) promptConfig.promptIds = body.incremental ? [...new Set([...body.promptIds,...(agent?.promptIds || [])])].filter(id=>!excluded('prompt',id)) : body.promptIds;
   else if (agent?.promptIds?.length) promptConfig.additionalPromptIds = agent.promptIds;
-  const prompt = composedPrompt(promptConfig);
-  if (!agent && !suiteIds.length && !directSkillIds.length && !prompt.layers.length && !hooks.length && !rules.length && !(previous.ruleIds || []).length && !Object.keys(previous.hooks || {}).length) throw new Error('请选择 Agent、Skills、Hooks、Rules 或系统提示词');
+  const prompt = composedPrompt(promptConfig, body.resolvedAssets);
+  if (!body.incremental && !agent && !suiteIds.length && !directSkillIds.length && !prompt.layers.length && !hooks.length && !rules.length && !(previous.ruleIds || []).length && !Object.keys(previous.hooks || {}).length) throw new Error('请选择 Agent、Skills、Hooks、Rules 或系统提示词');
   if (prompt.text) files.push({ path: path.join(projectRoot, '.agent-asset-manager', `${software}-system-prompt.md`), content: `# 系统提示词组合\n\n${prompt.text}\n` });
   const suiteInstructions = suites.map(suite => {
-    const members = suiteMembers(suite).map(member => {
-      const skill = forProfile('skill', get('skill', member.skillId), software, modelId);
+    const members = suiteMembers(suite).filter(member=>!excluded('skill',member.skillId)).map(member => {
+      const skill = forProfile('skill', resolveAsset('skill', member.skillId), software, modelId);
       const name = getVariant(skill, software).frontmatter.name || skill.variants.common?.frontmatter.name;
       return `- \`${name}\`${member.role ? `：${member.role.trim()}` : ''}`;
     }).join('\n');
@@ -876,8 +964,12 @@ function makeDeployment(body) {
     if (file.startsWith(managedRuleRoot)) assertHookDestination(projectRoot, file);
   }
   const assetRefs = [...(agent ? [['agent',agent.id]] : []), ...suiteIds.map(id=>['workflow',id]), ...[...selected.keys()].map(id=>['skill',id]), ...prompt.layers.map(layer=>['prompt',layer.id]), ...hookIds.map(id=>['hook',id]), ...hookGroupIds.map(id=>['hookgroup',id]), ...ruleIds.map(id=>['rule',id])];
-  const assetSnapshots = assetRefs.map(([type,id])=>{const asset=get(type,id);return {type,id,title:titleFor(type,asset),version:asset.activeVersion || history(type,id)[0]?.hash || '',updatedAt:asset.updatedAt};});
-  files.push({ path: manifestPath, content: JSON.stringify({ files: currentPaths, fileHashes: Object.fromEntries(files.map(file=>[file.path,crypto.createHash('sha256').update(file.content).digest('hex')])), agentId:agent?.id || null, modelId, assetSnapshots, tools: software === 'claude' ? (agent?.tools || []) : [], mcps: mcps.map(x => x.name), suiteIds, skillIds: [...selected.keys()], hookIds, directHookIds, hookGroupIds, hooks: managedHooks, hookFiles, ruleIds, ruleFiles, promptIds: prompt.layers.map(layer => layer.id), updatedAt: now() }, null, 2) + '\n' });
+  const assetContents = Object.fromEntries(assetRefs.map(([type,id])=> {
+    const original=resolveAsset(type,id), asset=forProfile(type,original,software,modelId);
+    return [type+'/'+id,{...asset,profiles:{},activeVersion:original.activeVersion || history(type,id)[0]?.hash || ''}];
+  }));
+  const assetSnapshots = assetRefs.map(([type,id])=>{const asset=resolveAsset(type,id);return {type,id,title:titleFor(type,asset),version:asset.activeVersion || history(type,id)[0]?.hash || '',updatedAt:asset.updatedAt};});
+  files.push({ path: manifestPath, content: JSON.stringify({ files: currentPaths, fileHashes: Object.fromEntries(files.map(file=>[file.path,crypto.createHash('sha256').update(file.content).digest('hex')])), agentId:agent?.id || null, modelId, assetSnapshots, assetContents, roots:body.roots, excludedAssets:body.excludedAssets || [], directSkillIds:body.skillIds || [], tools: software === 'claude' ? (agent?.tools || []) : [], mcps: mcps.map(x => x.name), suiteIds, skillIds: [...selected.keys()], hookIds, directHookIds, hookGroupIds, hooks: managedHooks, hookFiles, ruleIds, ruleFiles, promptIds: prompt.layers.map(layer => layer.id), updatedAt: now() }, null, 2) + '\n' });
   return { project: project.title, software, files, removals, promptLayers: prompt.layers };
 }
 async function callModel(modelId, system, user, maxTokens = 3000) {
@@ -890,7 +982,7 @@ const defaultReview = '你是 Agent Skills 审查员。依据 Agent Skills 规�
 const defaultImprove = '你是 Agent Skills 编辑员。根据用户遇到的问题修复 Skill。只返回 JSON 对象，格式为 {"summary":"修改说明","frontmatter":{...},"body":"完整 Markdown 正文"}。保留原有意图，并确保 name 和 description 符合 Agent Skills 规范。';
 function projectConfiguration(projectId) {
   const project=assertProject(projectId), projectRoot=project.directory;
-  const result={projectId, directory:projectRoot, deployments:[], externalRules:[]};
+  const result={projectId, incrementalDeployment:true, directory:projectRoot, deployments:[], externalRules:[]};
   const managedFiles=new Set();
   for(const software of ['claude','codex']) {
     const manifestPath=path.join(projectRoot,'.agent-asset-manager',`${software}.json`);
@@ -905,7 +997,9 @@ function projectConfiguration(projectId) {
       const refs=manifest.assetSnapshots || [...(manifest.agentId?[{type:'agent',id:manifest.agentId}]:[]), ...[['workflow','suiteIds'],['skill','skillIds'],['prompt','promptIds'],['hook','hookIds'],['hookgroup','hookGroupIds'],['rule','ruleIds']].flatMap(([type,key])=>(manifest[key]||[]).map(id=>({type,id})))];
       const assets=refs.map(ref=>{
         const current=rawGet(ref.type,ref.id);
-        return {...ref,title:ref.title||current?.title||'已删除资产',version:ref.version||null,deleted:!current,hasNewVersion:!!(current&&ref.updatedAt&&current.updatedAt!==ref.updatedAt)};
+        const versions=current?history(ref.type,ref.id):[];
+        const latestVersion=versions[0]?.hash || '';
+        return {...ref,title:ref.title||current?.title||'已删除资产',version:ref.version||null,latestVersion,selectedVersion:current?(get(ref.type,ref.id).activeVersion || latestVersion):'',deleted:!current,hasNewVersion:!!(latestVersion && ref.version && versions.findIndex(v=>v.hash===ref.version)>0)};
       });
       const files=(manifest.files||[]).map(file=>{
         assertHookDestination(projectRoot,file);
@@ -914,7 +1008,7 @@ function projectConfiguration(projectId) {
         return {path:path.relative(projectRoot,file).replaceAll('\\','/'),status:!exists?'missing':!fs.statSync(file).isFile()?'invalid':hash&&crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')!==hash?'modified':hash?'unchanged':'unverified'};
       });
       const model=manifest.modelId?rawGet('model',manifest.modelId):null;
-      result.deployments.push({software,applied:!!manifest.updatedAt,updatedAt:manifest.updatedAt||null,legacy:!!legacy,modelTitle:model?.title||'',assets,files,tools:manifest.tools||[],mcps:manifest.mcps||[]});
+      result.deployments.push({software,modelId:manifest.modelId || '',applied:!!manifest.updatedAt,updatedAt:manifest.updatedAt||null,legacy:!!legacy,modelTitle:model?.title||'',assets,files,tools:manifest.tools||[],mcps:manifest.mcps||[]});
     } catch(error) {result.deployments.push({software,error:error.message});}
   }
   const ruleRoot=path.join(projectRoot,'.claude','rules');
@@ -1062,7 +1156,9 @@ async function handleApi(req, url) {
   if (segments[0] === 'compose' && method === 'POST') return composedPrompt(body);
   if (segments[0] === 'deploy' && method === 'POST') {
     const plan = makeDeployment(body);
-    if (body.preview) return { project: plan.project, software: plan.software, files: plan.files.map(x => ({ path: x.path, content: Buffer.isBuffer(x.content) ? `[二进制文件 · ${x.content.length} 字节]` : x.content, ...(x.writeMode ? {writeMode:x.writeMode} : {}) })), removals: plan.removals, promptLayers: plan.promptLayers };
+    const previewToken = deploymentToken(plan);
+    if (body.incremental && !body.preview && body.previewToken !== previewToken) throw Error('预览后资产或项目文件已变化，请重新预览');
+    if (body.preview) return { previewToken, project: plan.project, software: plan.software, files: plan.files.map(x => ({ path: x.path, content: Buffer.isBuffer(x.content) ? `[二进制文件 · ${x.content.length} 字节]` : x.content, ...(x.writeMode ? {writeMode:x.writeMode} : {}) })), removals: plan.removals, promptLayers: plan.promptLayers };
     for (const file of plan.removals) if (fs.existsSync(file) && fs.statSync(file).isFile()) {
       fs.unlinkSync(file);
       let parent = path.dirname(file);

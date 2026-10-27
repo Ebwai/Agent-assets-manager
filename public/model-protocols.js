@@ -40,5 +40,7 @@ export function normalizeModelCapability(row = {}) {
   const contextWindow = row.contextWindow ?? 32768, reasoning = row.reasoning ?? 'none';
   if (!Number.isInteger(contextWindow) || contextWindow < 4096 || contextWindow > 2000000) throw new Error('上下文窗口需为 4096–2000000 的整数');
   if (!['none', 'standard'].includes(reasoning)) throw new Error('推理能力配置无效');
-  return { contextWindow, reasoning };
+  const imageInput = row.imageInput ?? true;
+  if (typeof imageInput !== 'boolean') throw new Error('图片输入能力需为布尔值');
+  return { contextWindow, reasoning, imageInput };
 }

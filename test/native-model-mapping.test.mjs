@@ -75,7 +75,7 @@ test('原生客户端验收：Codex 列表和实际请求、Claude 家族别名�
       res.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')); return;
     }
     if (req.url.endsWith('/responses')) {
-      requests.push({ api: 'codex', model: data.model });
+      requests.push({ api: 'codex', model: data.model, image: data.input?.some(item => item.content?.some(part => part.type === 'input_image')), inputTypes: data.input?.map(item => item.content?.map(part => part.type)) });
       const item = { id: 'msg_test', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'MAPPING_OK', annotations: [] }] };
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const events = [{ type: 'response.created', response: { id: 'resp_test', status: 'in_progress', output: [] } }, { type: 'response.output_item.added', output_index: 0, item: { ...item, status: 'in_progress', content: [] } }, { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: item.id, delta: 'MAPPING_OK' }, { type: 'response.output_item.done', output_index: 0, item }, { type: 'response.completed', response: { id: 'resp_test', status: 'completed', output: [item], usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 } } }];
@@ -89,6 +89,7 @@ test('原生客户端验收：Codex 列表和实际请求、Claude 家族别名�
   const keysFile = path.join(privateDir, 'keys.json'); fs.writeFileSync(keysFile, '{"test":"local-test-key"}');
   const app = createModelApplication({ privateDir, keysFile, codexHome, claudeHome });
   const service = { id: 'test', title: '测试映射', protocol: 'openai-responses', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, claudeBaseUrl: `http://127.0.0.1:${server.address().port}`, model: 'deepseek-flash', models: ['deepseek-flash', 'deepseek-v4-pro'] };
+  service.modelCapabilities = [{ id: 'deepseek-flash', imageInput: true }];
   const modelMapping = { claude: { opus: 'deepseek-v4-pro' } };
   for (const software of ['codex', 'claude']) { const input = { model: service, key: 'local-test-key', software, selectedModel: 'deepseek-flash', modelMapping }; app.apply(input, app.preview(input).token); }
   const env = { ...process.env, CODEX_HOME: codexHome, CLAUDE_CONFIG_DIR: claudeHome, DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost' };
@@ -99,6 +100,12 @@ test('原生客户端验收：Codex 列表和实际请求、Claude 家族别名�
   assert.deepEqual(listed.data.map(row => row.model), service.models);
   const inference = await run(codex, ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', 'Reply exactly MAPPING_OK. Do not use tools.'], env, root);
   assert.equal(inference.status, 0, inference.stderr); assert.match(inference.stdout, /MAPPING_OK/);
+  const imageFile = path.join(root, 'sample.png');
+  fs.writeFileSync(imageFile, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC', 'base64'));
+  const imageInference = await run(codex, ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--image', imageFile, '--', 'Reply exactly MAPPING_OK. Do not use tools.'], env, root);
+  t.diagnostic(imageInference.stderr);
+  assert.equal(imageInference.status, 0, imageInference.stderr); assert.match(imageInference.stdout, /MAPPING_OK/);
+  assert.ok(requests.some(row => row.api === 'codex' && row.image), '客户端必须实际发送 input_image');
   for (const alias of ['sonnet', 'opus', 'haiku']) {
     const result = await run(claude, ['-p', '--model', alias, '--output-format', 'json', '--tools', '', '--max-turns', '1', 'Reply exactly MAPPING_OK.'], env, root);
     assert.equal(result.status, 0, result.stderr + result.stdout.slice(0, 1000)); assert.match(result.stdout, /MAPPING_OK/);
